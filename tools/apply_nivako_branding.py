@@ -18,7 +18,7 @@ TARGETS = {
 
 def replace_regex(path: pathlib.Path, pattern: str, replacement: str):
     text = path.read_text(encoding='utf-8')
-    new_text, count = re.subn(pattern, replacement, text, flags=re.MULTILINE)
+    new_text, count = re.subn(pattern, lambda _m: replacement, text, flags=re.MULTILINE)
     if count < 1:
         raise RuntimeError(f'No match for pattern in {path}: {pattern}')
     path.write_text(new_text, encoding='utf-8')
