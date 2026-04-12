@@ -1,0 +1,18 @@
+{
+  "quicksupport": {
+    "app_name": "NIVAKO QuickSupport",
+    "product_name": "NIVAKO QuickSupport",
+    "binary_name": "nivako-quicksupport",
+    "original_filename": "NIVAKO-QuickSupport.exe",
+    "file_description": "NIVAKO QuickSupport",
+    "portable_description": "NIVAKO QuickSupport"
+  },
+  "remote": {
+    "app_name": "NIVAKO Remote",
+    "product_name": "NIVAKO Remote",
+    "binary_name": "nivako-remote",
+    "original_filename": "NIVAKO-Remote.exe",
+    "file_description": "NIVAKO Remote",
+    "portable_description": "NIVAKO Remote"
+  }
+}
