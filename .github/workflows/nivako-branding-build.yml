@@ -19,13 +19,32 @@ env:
   VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
 
 jobs:
+  generate-bridge:
+    uses: ./.github/workflows/bridge.yml
+
+  build-RustDeskTempTopMostWindow:
+    uses: ./.github/workflows/third-party-RustDeskTempTopMostWindow.yml
+    with:
+      upload-artifact: true
+      target: windows-2022
+      configuration: Release
+      platform: x64
+      target_version: Windows10
+
   build-windows-nivako:
+    needs: [build-RustDeskTempTopMostWindow, generate-bridge]
     runs-on: windows-2022
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Restore bridge files
+        uses: actions/download-artifact@master
+        with:
+          name: bridge-artifact
+          path: ./
 
       - name: Install LLVM and Clang
         uses: KyleMayes/install-llvm-action@v1
@@ -89,6 +108,12 @@ jobs:
           python3 .\build.py --portable --hwcodec --flutter --vram --skip-portable-pack
           New-Item -ItemType Directory -Force -Path .\artifacts | Out-Null
           Copy-Item -Recurse -Force .\flutter\build\windows\x64\runner\Release .\artifacts\${{ inputs.profile }}
+
+      - name: Download RustDeskTempTopMostWindow artifacts
+        uses: actions/download-artifact@master
+        with:
+          name: topmostwindow-artifacts
+          path: ./artifacts/${{ inputs.profile }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
