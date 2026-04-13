@@ -106,14 +106,25 @@ jobs:
         shell: powershell
         run: |
           python3 .\build.py --portable --hwcodec --flutter --vram --skip-portable-pack
-          New-Item -ItemType Directory -Force -Path .\artifacts | Out-Null
-          Copy-Item -Recurse -Force .\flutter\build\windows\x64\runner\Release .\artifacts\${{ inputs.profile }}
+          Remove-Item -Recurse -Force .\rustdesk -ErrorAction SilentlyContinue
+          Copy-Item -Recurse -Force .\flutter\build\windows\x64\runner\Release .\rustdesk
 
       - name: Download RustDeskTempTopMostWindow artifacts
         uses: actions/download-artifact@master
         with:
           name: topmostwindow-artifacts
-          path: ./artifacts/${{ inputs.profile }}
+          path: ./rustdesk
+
+      - name: Build standalone portable executable
+        shell: powershell
+        run: |
+          $binaryName = if ("${{ inputs.profile }}" -eq "quicksupport") { "nivako-quicksupport.exe" } else { "nivako-remote.exe" }
+          $targetName = if ("${{ inputs.profile }}" -eq "quicksupport") { "NIVAKO-QuickSupport.exe" } else { "NIVAKO-Remote.exe" }
+          pip3 install -r .\libs\portable\requirements.txt
+          python3 .\libs\portable\generate.py -f .\rustdesk -o .\libs\portable -e ".\rustdesk\$binaryName"
+          if (!(Test-Path .\target\release\rustdesk-portable-packer.exe)) { throw "Portable packer output not found" }
+          New-Item -ItemType Directory -Force -Path .\artifacts\${{ inputs.profile }} | Out-Null
+          Copy-Item -Force .\target\release\rustdesk-portable-packer.exe (Join-Path ".\artifacts\${{ inputs.profile }}" $targetName)
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

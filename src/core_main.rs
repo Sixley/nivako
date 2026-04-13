@@ -79,6 +79,7 @@ pub fn core_main() -> Option<Vec<String>> {
         }
         i += 1;
     }
+    apply_nivako_client_profile(&arg_exe);
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     if args.is_empty() {
         #[cfg(target_os = "linux")]
@@ -842,9 +843,55 @@ fn is_root() -> bool {
 
 /// Check if the executable is a Quick Support version.
 /// Note: This function must be kept in sync with `libs/portable/src/main.rs`.
+#[inline]
+fn apply_nivako_client_profile(exe: &str) {
+    let exe = exe.to_lowercase();
+    if !exe.contains("nivako") {
+        return;
+    }
+
+    config::Config::set_option(
+        "custom-rendezvous-server".into(),
+        "remote.nivako.de".into(),
+    );
+    config::Config::set_option("relay-server".into(), "remote.nivako.de".into());
+    config::Config::set_option("api-server".into(), "http://remote.nivako.de:21114".into());
+    config::Config::set_option(
+        "key".into(),
+        "Bpqk8W4p63tcE9HHVqWkEr36mX370WeM1WBnJ2Maj7o=".into(),
+    );
+
+    config::BUILTIN_SETTINGS
+        .write()
+        .unwrap()
+        .insert("hide-powered-by-me".into(), "Y".into());
+
+    let is_quicksupport = exe.contains("quicksupport")
+        || exe.contains("-qs-")
+        || exe.contains("-qs.exe")
+        || exe.contains("_qs.exe");
+    let is_remote = exe.contains("nivako-remote") || exe.contains("remote.exe");
+
+    let mut hard = config::HARD_SETTINGS.write().unwrap();
+    if is_quicksupport {
+        hard.insert("conn-type".into(), "incoming".into());
+        hard.insert("disable-settings".into(), "Y".into());
+        hard.insert("disable-installation".into(), "Y".into());
+        hard.insert("disable-account".into(), "Y".into());
+        hard.insert("disable-ab".into(), "Y".into());
+    } else if is_remote {
+        hard.insert("conn-type".into(), "outgoing".into());
+    }
+}
+
+/// Check if the executable is a Quick Support version.
+/// Note: This function must be kept in sync with `libs/portable/src/main.rs`.
 #[cfg(windows)]
 #[inline]
 fn is_quick_support_exe(exe: &str) -> bool {
     let exe = exe.to_lowercase();
-    exe.contains("-qs-") || exe.contains("-qs.exe") || exe.contains("_qs.exe")
+    exe.contains("quicksupport")
+        || exe.contains("-qs-")
+        || exe.contains("-qs.exe")
+        || exe.contains("_qs.exe")
 }
