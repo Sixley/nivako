@@ -2,6 +2,7 @@
 import json
 import pathlib
 import re
+import shutil
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -13,6 +14,9 @@ TARGETS = {
     'windows_cmake': ROOT / 'flutter' / 'windows' / 'CMakeLists.txt',
     'portable_cargo': ROOT / 'libs' / 'portable' / 'Cargo.toml',
     'app_config': ROOT / 'libs' / 'hbb_common' / 'src' / 'config.rs',
+    'branding_icon': ROOT / 'branding' / 'nivako' / 'assets' / 'app_icon.ico',
+    'runner_icon': ROOT / 'flutter' / 'windows' / 'runner' / 'resources' / 'app_icon.ico',
+    'portable_icon': ROOT / 'res' / 'icon.ico',
 }
 
 
@@ -22,6 +26,16 @@ def replace_regex(path: pathlib.Path, pattern: str, replacement: str):
     if count < 1:
         raise RuntimeError(f'No match for pattern in {path}: {pattern}')
     path.write_text(new_text, encoding='utf-8')
+
+
+def copy_branding_icon():
+    source = TARGETS['branding_icon']
+    if not source.exists():
+        raise RuntimeError(f'Branding icon not found: {source}')
+    for key in ('runner_icon', 'portable_icon'):
+        target = TARGETS[key]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
 
 
 def main():
@@ -95,6 +109,8 @@ def main():
         r'pub static ref APP_NAME: RwLock<String> = RwLock::new\(".*?"\.to_owned\(\)\);',
         f'pub static ref APP_NAME: RwLock<String> = RwLock::new("{p["app_name"]}".to_owned());',
     )
+
+    copy_branding_icon()
 
     print(f'Applied NIVAKO branding profile: {profile_name}')
 
