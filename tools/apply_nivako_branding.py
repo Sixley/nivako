@@ -17,6 +17,9 @@ TARGETS = {
     'branding_icon': ROOT / 'branding' / 'nivako' / 'assets' / 'app_icon.ico',
     'runner_icon': ROOT / 'flutter' / 'windows' / 'runner' / 'resources' / 'app_icon.ico',
     'portable_icon': ROOT / 'res' / 'icon.ico',
+    'flutter_asset_icon': ROOT / 'flutter' / 'assets' / 'icon.ico',
+    'flutter_asset_png': ROOT / 'flutter' / 'assets' / 'icon.png',
+    'portable_png': ROOT / 'res' / 'icon.png',
 }
 
 
@@ -32,10 +35,47 @@ def copy_branding_icon():
     source = TARGETS['branding_icon']
     if not source.exists():
         raise RuntimeError(f'Branding icon not found: {source}')
-    for key in ('runner_icon', 'portable_icon'):
+    for key in ('runner_icon', 'portable_icon', 'flutter_asset_icon'):
         target = TARGETS[key]
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
+
+    png_bytes = extract_largest_png_from_ico(source)
+    for key in ('flutter_asset_png', 'portable_png'):
+        target = TARGETS[key]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(png_bytes)
+
+
+def extract_largest_png_from_ico(path: pathlib.Path) -> bytes:
+    data = path.read_bytes()
+    if len(data) < 6:
+        raise RuntimeError(f'Invalid ICO header in {path}')
+
+    _reserved, icon_type, count = int.from_bytes(data[0:2], 'little'), int.from_bytes(data[2:4], 'little'), int.from_bytes(data[4:6], 'little')
+    if icon_type != 1 or count < 1:
+        raise RuntimeError(f'Unsupported ICO content in {path}')
+
+    best_blob = None
+    best_area = -1
+    for index in range(count):
+        entry = data[6 + index * 16: 6 + (index + 1) * 16]
+        if len(entry) != 16:
+            raise RuntimeError(f'Truncated ICO directory entry in {path}')
+        width = entry[0] or 256
+        height = entry[1] or 256
+        size = int.from_bytes(entry[8:12], 'little')
+        offset = int.from_bytes(entry[12:16], 'little')
+        blob = data[offset:offset + size]
+        if blob.startswith(b'\x89PNG\r\n\x1a\n'):
+            area = width * height
+            if area > best_area:
+                best_area = area
+                best_blob = blob
+
+    if best_blob is None:
+        raise RuntimeError(f'No PNG frame found in {path}')
+    return best_blob
 
 
 def main():
