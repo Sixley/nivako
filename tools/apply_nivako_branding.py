@@ -15,6 +15,7 @@ TARGETS = {
     'portable_cargo': ROOT / 'libs' / 'portable' / 'Cargo.toml',
     'app_config': ROOT / 'libs' / 'hbb_common' / 'src' / 'config.rs',
     'branding_icon': ROOT / 'branding' / 'nivako' / 'assets' / 'app_icon.ico',
+    'branding_png': ROOT / 'branding' / 'nivako' / 'assets' / 'app_icon.png',
     'runner_icon': ROOT / 'flutter' / 'windows' / 'runner' / 'resources' / 'app_icon.ico',
     'portable_icon': ROOT / 'res' / 'icon.ico',
     'flutter_asset_icon': ROOT / 'flutter' / 'assets' / 'icon.ico',
@@ -40,7 +41,12 @@ def copy_branding_icon():
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
 
-    png_bytes = extract_largest_png_from_ico(source)
+    png_source = TARGETS['branding_png']
+    if png_source.exists():
+        png_bytes = png_source.read_bytes()
+    else:
+        png_bytes = extract_largest_png_from_ico(source)
+
     for key in ('flutter_asset_png', 'portable_png'):
         target = TARGETS[key]
         target.parent.mkdir(parents=True, exist_ok=True)
