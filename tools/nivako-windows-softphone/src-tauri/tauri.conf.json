@@ -7,6 +7,7 @@
     "beforeDevCommand": "npm run dev:vite -- --port 5178",
     "devUrl": "http://localhost:5178",
     "beforeBuildCommand": "npm run build",
+    "beforeBundleCommand": "node src-tauri/scripts/stage-linphone-runtime.cjs",
     "frontendDist": "../dist"
   },
   "app": {
@@ -28,6 +29,9 @@
     "icon": ["icons/icon.ico"],
     "targets": ["msi", "nsis"],
     "publisher": "NIVAKO",
-    "category": "Business"
+    "category": "Business",
+    "resources": {
+      "linphone-runtime/*.dll": ""
+    }
   }
 }
