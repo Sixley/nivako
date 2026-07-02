@@ -4,6 +4,7 @@ use serde::Serialize;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -94,6 +95,7 @@ impl Drop for LinphoneSession {
 }
 
 static SIP_SESSION: Lazy<Arc<Mutex<Option<LinphoneSession>>>> = Lazy::new(|| Arc::new(Mutex::new(None)));
+static SIP_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, thiserror::Error)]
 enum AppError {
@@ -142,6 +144,9 @@ fn normalize_domain(sip_server: &str) -> String {
         .split(';')
         .next()
         .unwrap_or(sip_server.trim())
+        .split(':')
+        .next()
+        .unwrap_or(sip_server.trim())
         .to_string()
 }
 
@@ -149,6 +154,33 @@ fn registration_state(proxy: *mut LinphoneProxyConfig) -> (bool, String) {
     let state = unsafe { linphone_proxy_config_get_state(proxy) };
     let label = c_string_or_empty(unsafe { linphone_registration_state_to_string(state) });
     (state == 2, label)
+}
+
+fn ensure_sip_worker() {
+    if SIP_WORKER_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    let session = Arc::clone(&SIP_SESSION);
+    thread::spawn(move || loop {
+        if let Ok(mut guard) = session.lock() {
+            if let Some(active) = guard.as_mut() {
+                unsafe { linphone_core_iterate(active.core) };
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    });
+}
+
+fn tick_session_for(rounds: usize, delay_ms: u64) {
+    for _ in 0..rounds {
+        if let Ok(mut guard) = SIP_SESSION.lock() {
+            if let Some(active) = guard.as_mut() {
+                unsafe { linphone_core_iterate(active.core) };
+            }
+        }
+        thread::sleep(Duration::from_millis(delay_ms));
+    }
 }
 
 fn tick_core_for(core: *mut LinphoneCore, rounds: usize, delay_ms: u64) {
@@ -175,6 +207,69 @@ fn stored_or_supplied_secret(service: &str, account: &str, supplied: Option<Stri
     keyring::Entry::new(service, account)?.get_password().map_err(AppError::from)
 }
 
+fn carddav_query_body() -> &'static str {
+    r#"<?xml version="1.0" encoding="UTF-8"?>
+<card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
+  <d:prop>
+    <d:getetag />
+    <card:address-data />
+  </d:prop>
+</card:addressbook-query>"#
+}
+
+fn normalize_url_slash(url: &str) -> String {
+    let trimmed = url.trim();
+    if trimmed.ends_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/")
+    }
+}
+
+fn carddav_candidate_urls(url: &str, username: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let direct = normalize_url_slash(url);
+    candidates.push(direct.clone());
+
+    let lower_user = username.to_lowercase();
+    if username != lower_user {
+        candidates.push(direct.replace(&format!("/users/{username}/"), &format!("/users/{lower_user}/")));
+    }
+
+    if let Ok(parsed) = reqwest::Url::parse(&direct) {
+        let origin = parsed.origin().ascii_serialization();
+        for user in [username.to_string(), lower_user.clone()] {
+            for book in ["nivako-crm", "contacts", "kontakte"] {
+                candidates.push(format!("{origin}/remote.php/dav/addressbooks/users/{user}/{book}/"));
+            }
+        }
+    }
+
+    candidates.dedup();
+    candidates
+}
+
+fn report_carddav_url(client: &reqwest::blocking::Client, url: &str, auth: &str) -> Result<Option<String>, AppError> {
+    let method = reqwest::Method::from_bytes(b"REPORT").map_err(|error| AppError::Message(error.to_string()))?;
+    let response = client
+        .request(method, url)
+        .header("Authorization", format!("Basic {auth}"))
+        .header("Content-Type", "application/xml; charset=utf-8")
+        .header("Depth", "1")
+        .body(carddav_query_body())
+        .send()?;
+
+    let status = response.status();
+    let text = response.text()?;
+    if (status.is_success() || status.as_u16() == 207) && text.contains("BEGIN:VCARD") {
+        return Ok(Some(text));
+    }
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        return Err(AppError::Message(format!("CardDAV HTTP {status}: Zugangsdaten abgelehnt")));
+    }
+    Ok(None)
+}
+
 #[tauri::command]
 fn save_secret(service: String, account: String, password: String) -> Result<(), AppError> {
     let entry = keyring::Entry::new(&service, &account)?;
@@ -198,31 +293,25 @@ fn has_secret(service: String, account: String) -> Result<bool, AppError> {
 #[tauri::command]
 fn sync_carddav(url: String, username: String, password: Option<String>) -> Result<String, AppError> {
     let password = stored_or_supplied_secret(CARDDAV_SERVICE, &username, password)?;
-    let body = r#"<?xml version="1.0" encoding="UTF-8"?>
-<card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
-  <d:prop>
-    <d:getetag />
-    <card:address-data />
-  </d:prop>
-</card:addressbook-query>"#;
-
     let auth = base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
-    let method = reqwest::Method::from_bytes(b"REPORT").map_err(|error| AppError::Message(error.to_string()))?;
-    let response = reqwest::blocking::Client::new()
-        .request(method, url)
-        .header("Authorization", format!("Basic {auth}"))
-        .header("Content-Type", "application/xml; charset=utf-8")
-        .header("Depth", "1")
-        .body(body)
-        .send()?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .user_agent("NIVAKO Softphone CardDAV")
+        .build()?;
 
-    let status = response.status();
-    let text = response.text()?;
-    if !status.is_success() && status.as_u16() != 207 {
-        return Err(AppError::Message(format!("CardDAV HTTP {status}")));
+    let candidates = carddav_candidate_urls(&url, &username);
+    let mut tried = Vec::new();
+    for candidate in &candidates {
+        tried.push(candidate.clone());
+        if let Some(xml) = report_carddav_url(&client, candidate, &auth)? {
+            return Ok(xml);
+        }
     }
 
-    Ok(text)
+    Err(AppError::Message(format!(
+        "CardDAV hat unter keiner getesteten Adresse Kontakte geliefert: {}",
+        tried.join(", ")
+    )))
 }
 
 #[tauri::command]
@@ -283,12 +372,10 @@ fn sip_register(sip_server: String, sip_extension: String, display_name: String,
             return Err(AppError::Message("SIP-Konfiguration wurde von liblinphone abgelehnt".to_string()));
         }
 
-        tick_core_for(core, 40, 100);
         Ok(proxy)
     };
 
     let proxy = result?;
-    let (registered, state_label) = registration_state(proxy);
     let session = LinphoneSession {
         core,
         proxy,
@@ -302,11 +389,16 @@ fn sip_register(sip_server: String, sip_extension: String, display_name: String,
         .lock()
         .map_err(|_| AppError::Message("SIP-Sitzung ist blockiert".to_string()))?;
     *guard = Some(session);
+    drop(guard);
+
+    ensure_sip_worker();
+    tick_session_for(80, 100);
+    let (registered, state_label) = with_session(|session| Ok(registration_state(session.proxy)))?;
 
     Ok(NativeSipStatus {
         registered,
         message: format!(
-            "SIP-Registrierung gestartet: {display_name} / {sip_extension}@{domain}. Status: {state_label}"
+            "SIP-Registrierung geprueft: {display_name} / {sip_extension}@{domain}. Status: {state_label}"
         ),
     })
 }
