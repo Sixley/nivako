@@ -69,20 +69,21 @@ jobs:
         run: npm run build
 
       - name: Build Tauri Windows app
+        id: tauri_build
+        continue-on-error: true
         working-directory: ${{ env.SOFTPHONE_DIR }}
         env:
           CARGO_BUILD_JOBS: 2
         shell: pwsh
         run: |
           $ErrorActionPreference = "Continue"
+          $PSNativeCommandUseErrorActionPreference = $false
           New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\artifacts" | Out-Null
           npm run tauri -- build --verbose 2>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\artifacts\tauri-build.log"
-          if ($LASTEXITCODE -ne 0) {
-            "TAURI_BUILD_FAILED=true" >> $env:GITHUB_ENV
-          }
+          exit $LASTEXITCODE
 
       - name: Create portable artifact
-        if: env.TAURI_BUILD_FAILED != 'true'
+        if: steps.tauri_build.outcome == 'success'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -109,7 +110,7 @@ jobs:
             ${{ env.SOFTPHONE_DIR }}/src-tauri/target/release/bundle/**/*.exe
 
       - name: Fail if Tauri build failed
-        if: env.TAURI_BUILD_FAILED == 'true'
+        if: steps.tauri_build.outcome == 'failure'
         shell: pwsh
         run: |
           $logPath = "artifacts\tauri-build.log"
