@@ -22,8 +22,8 @@ const defaultSettings: Settings = {
   sipExtension: import.meta.env.VITE_SIP_EXTENSION || "101",
   sipWebSocketUrl: "wss://pbx.nivako.de:8089/ws",
   sipDisplayName: "NIVAKO 101",
-  allowedTestNumbers: "101,*43",
-  safeCallMode: true,
+  allowedTestNumbers: isTauriRuntime() ? "" : "101,*43",
+  safeCallMode: !isTauriRuntime(),
   useTelLinks: false,
   enableWebRtcSip: false,
   selectedMicrophoneId: "",
@@ -31,6 +31,15 @@ const defaultSettings: Settings = {
 };
 
 let settings = loadSettings(defaultSettings);
+if (isTauriRuntime() && !localStorage.getItem("nivako-softphone.desktop-defaults-v1")) {
+  settings = {
+    ...settings,
+    allowedTestNumbers: settings.allowedTestNumbers === "101,*43" ? "" : settings.allowedTestNumbers,
+    safeCallMode: false
+  };
+  saveSettings(settings);
+  localStorage.setItem("nivako-softphone.desktop-defaults-v1", "1");
+}
 let telephony: TelephonyAdapter = new SafeTelephonyAdapter(() => settings.useTelLinks && !settings.safeCallMode);
 let contacts = applyFavorites(loadContacts([]), loadFavoriteIds());
 let callHistory = loadHistory();
@@ -41,7 +50,9 @@ let hasStoredCardDavPassword = false;
 let hasStoredSipPassword = false;
 let query = "";
 let activeView: View = "contacts";
-let notice = "Bereit. CardDAV kann synchronisiert werden; echte Anrufe bleiben blockiert, solange der Anrufschutz aktiv ist.";
+let notice = isTauriRuntime()
+  ? "Desktop-Modus bereit. SIP und CardDAV laufen ueber die native Windows-App."
+  : "Bereit. CardDAV kann synchronisiert werden; echte Anrufe bleiben blockiert, solange der Anrufschutz aktiv ist.";
 let sipNotice = "SIP nicht registriert.";
 let syncState: "idle" | "syncing" | "ok" | "error" = "idle";
 let state: SoftphoneState = {
@@ -155,6 +166,7 @@ function addHistory(direction: CallEntry["direction"], number: string, name = nu
 
 async function dial(): Promise<void> {
   if (!state.activeNumber) return;
+  const nativeTelephony = canUseNativeTelephony();
   if (settings.safeCallMode) {
     notice = "Anrufschutz aktiv: Es wurde kein echter Anruf gestartet.";
     addHistory("outbound", state.activeNumber, state.activeContact?.displayName || state.activeNumber, "blocked");
@@ -162,7 +174,7 @@ async function dial(): Promise<void> {
     return;
   }
 
-  if (settings.enableWebRtcSip && !isNumberAllowed(state.activeNumber)) {
+  if (!nativeTelephony && settings.enableWebRtcSip && !isNumberAllowed(state.activeNumber)) {
     notice = `Anruf blockiert: ${state.activeNumber} ist nicht in den erlaubten Testnummern.`;
     addHistory("outbound", state.activeNumber, state.activeContact?.displayName || state.activeNumber, "blocked");
     render();
@@ -173,7 +185,10 @@ async function dial(): Promise<void> {
   try {
     await telephony.dial(state.activeNumber);
     addHistory("outbound", state.activeNumber, state.activeContact?.displayName || state.activeNumber, "started");
-    notice = settings.enableWebRtcSip
+    state = { ...state, callState: "active" };
+    notice = nativeTelephony
+      ? "SIP-Anruf gestartet."
+      : settings.enableWebRtcSip
       ? "SIP-Anruf gestartet."
       : settings.useTelLinks
         ? "Anruf wurde an den Windows-tel:-Handler uebergeben."
@@ -425,6 +440,15 @@ function navButton(view: View, label: string): string {
   return `<button data-view="${view}" class="${activeView === view ? "active" : ""}">${label}</button>`;
 }
 
+function telephonyStatusText(): string {
+  if (state.registered) return "SIP registriert";
+  if (settings.safeCallMode) return "Anrufschutz aktiv";
+  if (canUseNativeTelephony()) return "Desktop-SIP bereit";
+  if (settings.enableWebRtcSip) return "SIP bereit zur Registrierung";
+  if (settings.useTelLinks) return "tel:-Uebergabe aktiv";
+  return "SIP-Core fehlt";
+}
+
 function render(): void {
   const visibleContacts = searchContacts(contacts, query);
   const keypad = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"];
@@ -455,7 +479,7 @@ function render(): void {
         <div class="call-card">
           <div class="status-line">
             <span class="status-dot ${state.registered ? "" : "offline"}"></span>
-            <span>${state.registered ? "SIP registriert" : settings.safeCallMode ? "Anrufschutz aktiv" : settings.enableWebRtcSip ? "SIP bereit zur Registrierung" : settings.useTelLinks ? "tel:-Uebergabe aktiv" : "SIP-Core fehlt"}</span>
+            <span>${telephonyStatusText()}</span>
           </div>
           <div class="callee">
             <strong>${escapeHtml(state.activeContact?.displayName || state.activeNumber || "Nummer waehlen")}</strong>
