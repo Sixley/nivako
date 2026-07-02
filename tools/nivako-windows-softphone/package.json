@@ -1,0 +1,27 @@
+{
+  "name": "nivako-windows-softphone",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev-server.mjs",
+    "dev:vite": "vite --host 0.0.0.0",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "tauri:build:safe": "CARGO_BUILD_JOBS=1 nice -n 15 ionice -c2 -n7 tauri build",
+    "build": "tsc && vite build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@vitejs/plugin-basic-ssl": "^2.3.0",
+    "jssip": "^3.13.8",
+    "vite": "^8.1.2"
+  },
+  "devDependencies": {
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/cli": "^2.11.4",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
+  }
+}

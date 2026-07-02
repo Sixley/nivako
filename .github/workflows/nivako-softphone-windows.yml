@@ -1,0 +1,99 @@
+name: Build NIVAKO Softphone Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - nivako-softphone-windows-build
+    paths:
+      - ".github/workflows/nivako-softphone-windows.yml"
+      - "tools/nivako-windows-softphone/**"
+
+concurrency:
+  group: nivako-softphone-windows
+  cancel-in-progress: true
+
+env:
+  SOFTPHONE_DIR: tools/nivako-windows-softphone
+  LINPHONE_SDK_URL: https://download.linphone.org/releases/windows/sdk/linphone-sdk-win64-5.4.124.zip
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ${{ env.SOFTPHONE_DIR }}/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ env.SOFTPHONE_DIR }}/src-tauri -> target
+
+      - name: Install frontend dependencies
+        working-directory: ${{ env.SOFTPHONE_DIR }}
+        run: npm ci
+
+      - name: Download Linphone Windows SDK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Invoke-WebRequest -Uri "$env:LINPHONE_SDK_URL" -OutFile linphone-sdk.zip
+          Expand-Archive -Path linphone-sdk.zip -DestinationPath linphone-sdk -Force
+          $lib = Get-ChildItem -Path linphone-sdk -Recurse -Filter liblinphone.lib | Select-Object -First 1
+          if (-not $lib) {
+            Get-ChildItem -Path linphone-sdk -Recurse -Depth 3 | Select-Object FullName
+            throw "liblinphone.lib was not found in the Linphone SDK archive"
+          }
+          "LINPHONE_SDK_DIR=$((Resolve-Path linphone-sdk).Path)" >> $env:GITHUB_ENV
+          "LINPHONE_LIB_DIR=$((Split-Path $lib.FullName -Parent))" >> $env:GITHUB_ENV
+          Write-Host "Using liblinphone from $($lib.FullName)"
+
+      - name: Test
+        working-directory: ${{ env.SOFTPHONE_DIR }}
+        run: npm test -- --run
+
+      - name: Build frontend
+        working-directory: ${{ env.SOFTPHONE_DIR }}
+        run: npm run build
+
+      - name: Build Tauri Windows app
+        working-directory: ${{ env.SOFTPHONE_DIR }}
+        env:
+          CARGO_BUILD_JOBS: 2
+        run: npm run tauri build -- --verbose
+
+      - name: Create portable artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $portable = "artifacts\nivako-softphone-windows-portable"
+          New-Item -ItemType Directory -Force -Path $portable | Out-Null
+          $exe = Get-ChildItem -Path "$env:SOFTPHONE_DIR\src-tauri\target\release" -Recurse -Filter "nivako-softphone.exe" | Select-Object -First 1
+          if (-not $exe) {
+            throw "nivako-softphone.exe was not found"
+          }
+          Copy-Item $exe.FullName $portable
+          Get-ChildItem -Path linphone-sdk -Recurse -Filter *.dll | Copy-Item -Destination $portable -Force
+          Compress-Archive -Path "$portable\*" -DestinationPath "artifacts\nivako-softphone-windows-portable.zip" -Force
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nivako-softphone-windows
+          if-no-files-found: error
+          path: |
+            artifacts/nivako-softphone-windows-portable.zip
+            ${{ env.SOFTPHONE_DIR }}/src-tauri/target/release/bundle/**/*.msi
+            ${{ env.SOFTPHONE_DIR }}/src-tauri/target/release/bundle/**/*.exe

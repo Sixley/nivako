@@ -1,0 +1,44 @@
+import { describe, expect, it } from "vitest";
+import { parseVCard } from "./carddav";
+import { normalizePhoneNumber } from "./phoneNumber";
+import { searchContacts } from "./search";
+
+describe("phone normalization", () => {
+  it("normalizes German national numbers", () => {
+    expect(normalizePhoneNumber("030 123-456")).toBe("+4930123456");
+  });
+
+  it("keeps international numbers", () => {
+    expect(normalizePhoneNumber("+49 30 123456")).toBe("+4930123456");
+  });
+});
+
+describe("vCard parsing", () => {
+  it("extracts names, organization and phone numbers", () => {
+    const contact = parseVCard(`BEGIN:VCARD
+VERSION:3.0
+FN:Kontakt Eins
+ORG:Beispielfirma
+TEL;TYPE=CELL:+49 30 123456
+EMAIL:test@example.test
+END:VCARD`, "/contact/test.vcf");
+
+    expect(contact.displayName).toBe("Kontakt Eins");
+    expect(contact.organization).toBe("Beispielfirma");
+    expect(contact.phones[0].label).toBe("mobile");
+    expect(contact.phones[0].normalized).toBe("+4930123456");
+  });
+});
+
+describe("contact search", () => {
+  it("finds contacts by normalized number fragments", () => {
+    const contact = parseVCard(`BEGIN:VCARD
+VERSION:3.0
+FN:Kontakt Zwei
+ORG:Beispielfirma
+TEL;TYPE=WORK:030 123456
+END:VCARD`);
+
+    expect(searchContacts([contact], "4930").length).toBe(1);
+  });
+});
