@@ -72,7 +72,10 @@ jobs:
         working-directory: ${{ env.SOFTPHONE_DIR }}
         env:
           CARGO_BUILD_JOBS: 2
-        run: npm run tauri build -- --verbose
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          npm run tauri -- build --verbose
 
       - name: Create portable artifact
         shell: pwsh
