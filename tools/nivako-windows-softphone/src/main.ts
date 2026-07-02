@@ -103,7 +103,7 @@ async function refreshAudioDevices(requestPermission = false): Promise<void> {
 
 function configureTelephony(): void {
   if (canUseNativeTelephony()) {
-    telephony = new NativeTelephonyAdapter(() => settings, (status, registered) => {
+    telephony = new NativeTelephonyAdapter(() => settings, () => sipPassword, (status, registered) => {
       sipNotice = status;
       state = { ...state, registered: registered ?? state.registered };
       notice = status;
@@ -249,7 +249,7 @@ async function syncCardDav(): Promise<void> {
   render();
 
   try {
-    const synced = await syncCardDavContacts(settings);
+    const synced = await syncCardDavContacts(settings, cardDavPassword);
     const favoriteIds = loadFavoriteIds();
     contacts = applyFavorites(synced.filter((contact) => contact.phones.length > 0), favoriteIds);
     persistContacts();
@@ -590,10 +590,16 @@ function bindEvents(): void {
     cardDavPassword = String(form.get("cardDavPassword") || "");
     sipPassword = String(form.get("sipPassword") || "");
     saveSettings(settings);
-    await saveEnteredSecrets();
-    await updateCredentialState();
-    configureTelephony();
-    notice = "Einstellungen gespeichert.";
+    try {
+      await saveEnteredSecrets();
+      await updateCredentialState();
+      configureTelephony();
+      notice = "Einstellungen gespeichert.";
+    } catch (error) {
+      await updateCredentialState();
+      configureTelephony();
+      notice = `Einstellungen gespeichert, aber Passwort-Speicherung fehlgeschlagen: ${error instanceof Error ? error.message : "Unbekannter Fehler"}. Das eingegebene Passwort bleibt fuer diese Sitzung nutzbar.`;
+    }
     render();
     })();
   });
