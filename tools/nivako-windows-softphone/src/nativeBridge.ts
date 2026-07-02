@@ -12,10 +12,11 @@ export function isTauriRuntime(): boolean {
   return "__TAURI_INTERNALS__" in window;
 }
 
-export async function syncCardDavNative(settings: Settings): Promise<Contact[]> {
+export async function syncCardDavNative(settings: Settings, password?: string): Promise<Contact[]> {
   const xml = await tauriInvoke<string>("sync_carddav", {
     url: settings.cardDavUrl,
-    username: settings.cardDavUser
+    username: settings.cardDavUser,
+    password: password || null
   });
 
   return parseCardDavMultistatus(xml).map((resource) => parseVCard(resource.vcard, resource.href));
@@ -29,11 +30,12 @@ export async function hasSecretNative(service: string, account: string): Promise
   return tauriInvoke<boolean>("has_secret", { service, account });
 }
 
-export async function registerSipNative(settings: Settings): Promise<NativeSipStatus> {
+export async function registerSipNative(settings: Settings, password?: string): Promise<NativeSipStatus> {
   return tauriInvoke<NativeSipStatus>("sip_register", {
     sipServer: settings.sipServer,
     sipExtension: settings.sipExtension,
-    displayName: settings.sipDisplayName
+    displayName: settings.sipDisplayName,
+    password: password || null
   });
 }
 
