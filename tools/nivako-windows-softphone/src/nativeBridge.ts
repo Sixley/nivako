@@ -3,6 +3,15 @@ import type { Contact, NativeSipStatus, Settings } from "./types";
 
 type Invoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
+interface CardDavSyncResult {
+  xml: string;
+  url: string;
+  vcard_count: number;
+  tried: string[];
+}
+
+let lastCardDavDiagnostic = "";
+
 async function tauriInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   const api = await import("@tauri-apps/api/core");
   return (api.invoke as Invoke)<T>(command, args);
@@ -12,14 +21,19 @@ export function isTauriRuntime(): boolean {
   return "__TAURI_INTERNALS__" in window;
 }
 
+export function getLastCardDavDiagnostic(): string {
+  return lastCardDavDiagnostic;
+}
+
 export async function syncCardDavNative(settings: Settings, password?: string): Promise<Contact[]> {
-  const xml = await tauriInvoke<string>("sync_carddav", {
+  const result = await tauriInvoke<CardDavSyncResult>("sync_carddav", {
     url: settings.cardDavUrl,
     username: settings.cardDavUser,
     password: password || null
   });
 
-  return parseCardDavMultistatus(xml).map((resource) => parseVCard(resource.vcard, resource.href));
+  lastCardDavDiagnostic = `native URL ${result.url}; ${result.vcard_count} vCards; ${result.tried.length} Pfad(e) getestet`;
+  return parseCardDavMultistatus(result.xml).map((resource) => parseVCard(resource.vcard, resource.href));
 }
 
 export async function saveSecretNative(service: string, account: string, password: string): Promise<void> {
