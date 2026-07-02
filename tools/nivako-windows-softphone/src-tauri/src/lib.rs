@@ -26,7 +26,8 @@ type LinphoneProxyConfig = c_void;
 #[allow(non_camel_case_types)]
 type bool_t = c_int;
 
-#[link(name = "linphone")]
+#[cfg_attr(target_os = "windows", link(name = "liblinphone"))]
+#[cfg_attr(not(target_os = "windows"), link(name = "linphone"))]
 extern "C" {
     fn linphone_core_new(
         vtable: *const c_void,
