@@ -2,7 +2,7 @@ import "./styles.css";
 import { loadAudioDevices, type AudioDeviceState } from "./audioDevices";
 import { parseManyVCards } from "./carddav";
 import { syncCardDavContacts } from "./contactsRepository";
-import { hasSecretNative, isTauriRuntime, saveSecretNative } from "./nativeBridge";
+import { getLastCardDavDiagnostic, hasSecretNative, isTauriRuntime, saveSecretNative } from "./nativeBridge";
 import { canUseNativeTelephony, NativeTelephonyAdapter } from "./nativeTelephony";
 import { searchContacts } from "./search";
 import { loadContacts, loadFavoriteIds, loadHistory, loadSettings, saveContacts, saveFavoriteIds, saveHistory, saveSettings } from "./storage";
@@ -12,6 +12,8 @@ import type { CallEntry, Contact, Settings, SoftphoneState } from "./types";
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
+const appVersion = "0.1.1";
+const buildLabel = "0.1.1 CardDAV/SIP Diagnose";
 
 type View = "contacts" | "history" | "favorites" | "audio" | "settings";
 
@@ -51,7 +53,7 @@ let hasStoredSipPassword = false;
 let query = "";
 let activeView: View = "contacts";
 let notice = isTauriRuntime()
-  ? "Desktop-Modus bereit. SIP und CardDAV laufen ueber die native Windows-App."
+  ? `Desktop-Modus bereit. Build ${buildLabel}.`
   : "Bereit. CardDAV kann synchronisiert werden; echte Anrufe bleiben blockiert, solange der Anrufschutz aktiv ist.";
 let sipNotice = "SIP nicht registriert.";
 let syncState: "idle" | "syncing" | "ok" | "error" = "idle";
@@ -251,10 +253,12 @@ async function syncCardDav(): Promise<void> {
   try {
     const synced = await syncCardDavContacts(settings, cardDavPassword);
     const favoriteIds = loadFavoriteIds();
-    contacts = applyFavorites(synced.filter((contact) => contact.phones.length > 0), favoriteIds);
+    const contactsWithPhones = synced.filter((contact) => contact.phones.length > 0);
+    contacts = applyFavorites(contactsWithPhones, favoriteIds);
     persistContacts();
     syncState = "ok";
-    notice = `${contacts.length} CardDAV-Kontakte synchronisiert.`;
+    const nativeDiagnostic = isTauriRuntime() ? ` ${getLastCardDavDiagnostic()}` : "";
+    notice = `CardDAV OK: ${synced.length} Kontakte gelesen, ${contactsWithPhones.length} mit Telefonnummer.${nativeDiagnostic}`;
   } catch (error) {
     syncState = "error";
     notice = `CardDAV-Sync fehlgeschlagen: ${error instanceof Error ? error.message : "Unbekannter Fehler"}`;
@@ -460,7 +464,7 @@ function render(): void {
           <span class="brand-mark">N</span>
           <div>
             <strong>NIVAKO Softphone</strong>
-            <small>${state.registered ? `${escapeHtml(settings.sipExtension)} registriert` : "SIP nicht registriert"}</small>
+            <small>v${appVersion} · ${state.registered ? `${escapeHtml(settings.sipExtension)} registriert` : "SIP nicht registriert"}</small>
           </div>
         </div>
         <nav class="nav">
@@ -500,6 +504,7 @@ function render(): void {
             <button class="secondary" id="mute" ${state.callState === "idle" ? "disabled" : ""}>${state.muted ? "Mikro an" : "Stumm"}</button>
           </div>
           <div class="sip-note">${escapeHtml(canUseNativeTelephony() ? "Desktop-Modus" : "Browser-Modus")} · ${escapeHtml(sipNotice)} · Testnummern: ${escapeHtml(settings.allowedTestNumbers || "keine")}</div>
+          <div class="sip-note">Build ${escapeHtml(buildLabel)} · CardDAV: ${escapeHtml(settings.cardDavUser || "kein Benutzer")} · ${escapeHtml(settings.cardDavUrl || "keine URL")}</div>
         </div>
 
         <div class="history">
