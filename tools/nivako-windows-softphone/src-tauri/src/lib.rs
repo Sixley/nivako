@@ -18,6 +18,14 @@ struct NativeSipStatus {
     message: String,
 }
 
+#[derive(Debug, Serialize)]
+struct CardDavSyncResult {
+    xml: String,
+    url: String,
+    vcard_count: usize,
+    tried: Vec<String>,
+}
+
 type LinphoneCore = c_void;
 type LinphoneCall = c_void;
 type LinphoneAddress = c_void;
@@ -291,7 +299,7 @@ fn has_secret(service: String, account: String) -> Result<bool, AppError> {
 }
 
 #[tauri::command]
-fn sync_carddav(url: String, username: String, password: Option<String>) -> Result<String, AppError> {
+fn sync_carddav(url: String, username: String, password: Option<String>) -> Result<CardDavSyncResult, AppError> {
     let password = stored_or_supplied_secret(CARDDAV_SERVICE, &username, password)?;
     let auth = base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
     let client = reqwest::blocking::Client::builder()
@@ -304,7 +312,13 @@ fn sync_carddav(url: String, username: String, password: Option<String>) -> Resu
     for candidate in &candidates {
         tried.push(candidate.clone());
         if let Some(xml) = report_carddav_url(&client, candidate, &auth)? {
-            return Ok(xml);
+            let vcard_count = xml.matches("BEGIN:VCARD").count();
+            return Ok(CardDavSyncResult {
+                xml,
+                url: candidate.clone(),
+                vcard_count,
+                tried,
+            });
         }
     }
 
