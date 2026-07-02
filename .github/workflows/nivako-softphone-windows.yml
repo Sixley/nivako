@@ -106,7 +106,6 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $release = "$env:SOFTPHONE_DIR\src-tauri\target\release"
-          $bundle = "$release\bundle"
           if (-not (Test-Path "$release\nivako-softphone.exe")) {
             throw "Release executable was not created"
           }
@@ -116,12 +115,13 @@ jobs:
           if (-not (Test-Path "$release\liblinphone.dll")) {
             throw "liblinphone.dll is missing next to the release executable"
           }
-          $bundledLinphone = Get-ChildItem -Path $bundle -Recurse -Filter liblinphone.dll -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $bundledLinphone) {
-            Get-ChildItem -Path $bundle -Recurse | Select-Object FullName
-            throw "liblinphone.dll is missing from the installer bundle output"
+          $manifests = Get-ChildItem -Path $release -Recurse -Include installer.nsi,*.wxs -ErrorAction SilentlyContinue
+          $manifestHit = $manifests | Where-Object { Select-String -Path $_.FullName -Pattern "liblinphone.dll" -Quiet } | Select-Object -First 1
+          if (-not $manifestHit) {
+            $manifests | Select-Object FullName
+            throw "liblinphone.dll is missing from the generated installer manifests"
           }
-          Write-Host "Bundled liblinphone.dll at $($bundledLinphone.FullName)"
+          Write-Host "Installer manifest includes liblinphone.dll via $($manifestHit.FullName)"
 
       - name: Create portable artifact
         if: steps.tauri_build.outcome == 'success'
