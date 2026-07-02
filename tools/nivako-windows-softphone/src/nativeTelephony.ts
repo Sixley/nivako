@@ -5,11 +5,12 @@ import type { TelephonyAdapter } from "./telephony";
 export class NativeTelephonyAdapter implements TelephonyAdapter {
   constructor(
     private readonly settings: () => Settings,
+    private readonly password: () => string,
     private readonly onStatus: (status: string, registered?: boolean) => void
   ) {}
 
   async register(): Promise<void> {
-    const result = await registerSipNative(this.settings());
+    const result = await registerSipNative(this.settings(), this.password());
     this.onStatus(result.message, result.registered);
   }
 
