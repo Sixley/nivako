@@ -12,8 +12,8 @@ import type { CallEntry, Contact, Settings, SoftphoneState } from "./types";
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.1.1";
-const buildLabel = "0.1.1 CardDAV/SIP Diagnose";
+const appVersion = "0.1.2";
+const buildLabel = "0.1.2 Fehlerdetails";
 
 type View = "contacts" | "history" | "favorites" | "audio" | "settings";
 
@@ -65,6 +65,20 @@ let state: SoftphoneState = {
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#039;" })[char] || char);
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === "string" && error.trim()) return error;
+  if (typeof error === "number" || typeof error === "boolean") return String(error);
+  if (error && typeof error === "object") {
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return fallback;
+    }
+  }
+  return fallback;
 }
 
 function applyFavorites(nextContacts: Contact[], favoriteIds: string[]): Contact[] {
@@ -139,7 +153,7 @@ async function registerSip(): Promise<void> {
     await telephony.register();
   } catch (error) {
     state = { ...state, registered: false };
-    sipNotice = error instanceof Error ? error.message : "SIP Registrierung fehlgeschlagen";
+    sipNotice = errorMessage(error, "SIP Registrierung fehlgeschlagen");
     notice = sipNotice;
     render();
   }
@@ -197,7 +211,7 @@ async function dial(): Promise<void> {
         : "Kein SIP-Core verbunden. Nummer wurde nur im lokalen Verlauf erfasst.";
   } catch (error) {
     addHistory("outbound", state.activeNumber, state.activeContact?.displayName || state.activeNumber, "failed");
-    notice = error instanceof Error ? error.message : "Anruf fehlgeschlagen";
+    notice = errorMessage(error, "Anruf fehlgeschlagen");
     state = { ...state, callState: "idle" };
   }
   render();
@@ -261,7 +275,7 @@ async function syncCardDav(): Promise<void> {
     notice = `CardDAV OK: ${synced.length} Kontakte gelesen, ${contactsWithPhones.length} mit Telefonnummer.${nativeDiagnostic}`;
   } catch (error) {
     syncState = "error";
-    notice = `CardDAV-Sync fehlgeschlagen: ${error instanceof Error ? error.message : "Unbekannter Fehler"}`;
+    notice = `CardDAV-Sync fehlgeschlagen: ${errorMessage(error, "Unbekannter Fehler")}`;
   }
 
   render();
@@ -603,7 +617,7 @@ function bindEvents(): void {
     } catch (error) {
       await updateCredentialState();
       configureTelephony();
-      notice = `Einstellungen gespeichert, aber Passwort-Speicherung fehlgeschlagen: ${error instanceof Error ? error.message : "Unbekannter Fehler"}. Das eingegebene Passwort bleibt fuer diese Sitzung nutzbar.`;
+      notice = `Einstellungen gespeichert, aber Passwort-Speicherung fehlgeschlagen: ${errorMessage(error, "Unbekannter Fehler")}. Das eingegebene Passwort bleibt fuer diese Sitzung nutzbar.`;
     }
     render();
     })();
