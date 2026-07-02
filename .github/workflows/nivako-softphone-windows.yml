@@ -110,4 +110,10 @@ jobs:
 
       - name: Fail if Tauri build failed
         if: env.TAURI_BUILD_FAILED == 'true'
-        run: exit 1
+        shell: pwsh
+        run: |
+          $logPath = "artifacts\tauri-build.log"
+          $tail = if (Test-Path $logPath) { (Get-Content $logPath -Tail 50) -join "`n" } else { "No tauri-build.log found" }
+          $escaped = $tail.Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
+          Write-Host "::error title=Tauri build failed::$escaped"
+          exit 1
