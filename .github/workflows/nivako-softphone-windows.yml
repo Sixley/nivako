@@ -74,10 +74,15 @@ jobs:
           CARGO_BUILD_JOBS: 2
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
-          npm run tauri -- build --verbose
+          $ErrorActionPreference = "Continue"
+          New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\artifacts" | Out-Null
+          npm run tauri -- build --verbose 2>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\artifacts\tauri-build.log"
+          if ($LASTEXITCODE -ne 0) {
+            "TAURI_BUILD_FAILED=true" >> $env:GITHUB_ENV
+          }
 
       - name: Create portable artifact
+        if: env.TAURI_BUILD_FAILED != 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -92,11 +97,17 @@ jobs:
           Compress-Archive -Path "$portable\*" -DestinationPath "artifacts\nivako-softphone-windows-portable.zip" -Force
 
       - name: Upload Windows artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: nivako-softphone-windows
-          if-no-files-found: error
+          if-no-files-found: warn
           path: |
+            artifacts/tauri-build.log
             artifacts/nivako-softphone-windows-portable.zip
             ${{ env.SOFTPHONE_DIR }}/src-tauri/target/release/bundle/**/*.msi
             ${{ env.SOFTPHONE_DIR }}/src-tauri/target/release/bundle/**/*.exe
+
+      - name: Fail if Tauri build failed
+        if: env.TAURI_BUILD_FAILED == 'true'
+        run: exit 1
