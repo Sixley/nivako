@@ -1,16 +1,17 @@
 use base64::Engine;
 use once_cell::sync::Lazy;
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CStr, CString};
 use std::fs;
+use std::net::{ToSocketAddrs, UdpSocket};
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::PathBuf;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const CARDDAV_SERVICE: &str = "NIVAKO Softphone CardDAV";
 const SIP_SERVICE: &str = "NIVAKO Softphone SIP";
@@ -69,14 +70,26 @@ extern "C" {
         proxy_config: *mut LinphoneProxyConfig,
         server_address: *const c_char,
     ) -> c_int;
-    fn linphone_proxy_config_enable_register(proxy_config: *mut LinphoneProxyConfig, enable: bool_t);
-    fn linphone_core_add_proxy_config(core: *mut LinphoneCore, config: *mut LinphoneProxyConfig) -> c_int;
-    fn linphone_core_set_default_proxy_config(core: *mut LinphoneCore, config: *mut LinphoneProxyConfig);
+    fn linphone_proxy_config_enable_register(
+        proxy_config: *mut LinphoneProxyConfig,
+        enable: bool_t,
+    );
+    fn linphone_core_add_proxy_config(
+        core: *mut LinphoneCore,
+        config: *mut LinphoneProxyConfig,
+    ) -> c_int;
+    fn linphone_core_set_default_proxy_config(
+        core: *mut LinphoneCore,
+        config: *mut LinphoneProxyConfig,
+    );
     fn linphone_proxy_config_get_state(proxy_config: *const LinphoneProxyConfig) -> c_int;
     fn linphone_registration_state_to_string(state: c_int) -> *const c_char;
     fn linphone_address_new(address: *const c_char) -> *mut LinphoneAddress;
     fn linphone_address_unref(address: *mut LinphoneAddress);
-    fn linphone_core_invite_address(core: *mut LinphoneCore, address: *const LinphoneAddress) -> *mut LinphoneCall;
+    fn linphone_core_invite_address(
+        core: *mut LinphoneCore,
+        address: *const LinphoneAddress,
+    ) -> *mut LinphoneCall;
     fn linphone_core_get_current_call(core: *const LinphoneCore) -> *mut LinphoneCall;
     fn linphone_core_terminate_all_calls(core: *mut LinphoneCore) -> c_int;
     fn linphone_core_pause_call(core: *mut LinphoneCore, call: *mut LinphoneCall) -> c_int;
@@ -105,7 +118,8 @@ impl Drop for LinphoneSession {
     }
 }
 
-static SIP_SESSION: Lazy<Arc<Mutex<Option<LinphoneSession>>>> = Lazy::new(|| Arc::new(Mutex::new(None)));
+static SIP_SESSION: Lazy<Arc<Mutex<Option<LinphoneSession>>>> =
+    Lazy::new(|| Arc::new(Mutex::new(None)));
 static SIP_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, thiserror::Error)]
@@ -128,7 +142,8 @@ impl serde::Serialize for AppError {
 }
 
 fn cstring(value: &str, field: &str) -> Result<CString, AppError> {
-    CString::new(value).map_err(|_| AppError::Message(format!("{field} enthaelt ungueltige Null-Bytes")))
+    CString::new(value)
+        .map_err(|_| AppError::Message(format!("{field} enthaelt ungueltige Null-Bytes")))
 }
 
 fn c_string_or_empty(ptr: *const c_char) -> String {
@@ -159,6 +174,276 @@ fn normalize_domain(sip_server: &str) -> String {
         .next()
         .unwrap_or(sip_server.trim())
         .to_string()
+}
+
+fn sip_host_port(sip_server: &str) -> Result<(String, u16), AppError> {
+    let server = sip_server
+        .trim()
+        .trim_start_matches("sip:")
+        .trim_start_matches("sips:")
+        .split(';')
+        .next()
+        .unwrap_or(sip_server.trim());
+    let (host, port) = match server.rsplit_once(':') {
+        Some((host, port)) if port.chars().all(|char| char.is_ascii_digit()) => {
+            let parsed = port
+                .parse::<u16>()
+                .map_err(|error| AppError::Message(format!("Ungueltiger SIP-Port: {error}")))?;
+            (host.to_string(), parsed)
+        }
+        _ => (server.to_string(), 5060),
+    };
+    if host.trim().is_empty() {
+        return Err(AppError::Message("SIP-Server fehlt".to_string()));
+    }
+    Ok((host, port))
+}
+
+fn sip_token(prefix: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("{prefix}{nanos:x}")
+}
+
+fn sip_register_message(
+    domain: &str,
+    extension: &str,
+    display_name: &str,
+    local_addr: &str,
+    branch: &str,
+    tag: &str,
+    call_id: &str,
+    cseq: u32,
+    authorization: Option<&str>,
+) -> String {
+    let auth_line = authorization
+        .map(|value| format!("Authorization: {value}\r\n"))
+        .unwrap_or_default();
+    format!(
+        "REGISTER sip:{domain} SIP/2.0\r\n\
+         Via: SIP/2.0/UDP {local_addr};branch={branch};rport\r\n\
+         Max-Forwards: 70\r\n\
+         From: \"{display_name}\" <sip:{extension}@{domain}>;tag={tag}\r\n\
+         To: <sip:{extension}@{domain}>\r\n\
+         Call-ID: {call_id}\r\n\
+         CSeq: {cseq} REGISTER\r\n\
+         Contact: <sip:{extension}@{local_addr};transport=udp>\r\n\
+         Expires: 120\r\n\
+         User-Agent: NIVAKO Softphone\r\n\
+         {auth_line}\
+         Content-Length: 0\r\n\r\n"
+    )
+}
+
+fn parse_sip_status(response: &str) -> Option<(u16, String)> {
+    let line = response.lines().next()?.trim();
+    let mut parts = line.splitn(3, ' ');
+    let _version = parts.next()?;
+    let code = parts.next()?.parse::<u16>().ok()?;
+    let reason = parts.next().unwrap_or("").to_string();
+    Some((code, reason))
+}
+
+fn find_sip_header<'a>(response: &'a str, name: &str) -> Option<&'a str> {
+    let prefix = format!("{}:", name.to_ascii_lowercase());
+    response.lines().find_map(|line| {
+        let trimmed = line.trim();
+        if trimmed.to_ascii_lowercase().starts_with(&prefix) {
+            trimmed.split_once(':').map(|(_, value)| value.trim())
+        } else {
+            None
+        }
+    })
+}
+
+fn parse_digest_challenge(header: &str) -> HashMap<String, String> {
+    let mut value = header.trim();
+    if value.to_ascii_lowercase().starts_with("digest ") {
+        value = value[7..].trim();
+    }
+    value
+        .split(',')
+        .filter_map(|part| {
+            let (key, raw_value) = part.trim().split_once('=')?;
+            Some((
+                key.trim().to_ascii_lowercase(),
+                raw_value.trim().trim_matches('"').to_string(),
+            ))
+        })
+        .collect()
+}
+
+fn md5_hex(value: &str) -> String {
+    format!("{:x}", md5::compute(value.as_bytes()))
+}
+
+fn sip_digest_authorization(
+    extension: &str,
+    password: &str,
+    domain: &str,
+    challenge: &HashMap<String, String>,
+) -> Result<String, AppError> {
+    let realm = challenge
+        .get("realm")
+        .ok_or_else(|| AppError::Message("SIP 401 ohne Digest-Realm".to_string()))?;
+    let nonce = challenge
+        .get("nonce")
+        .ok_or_else(|| AppError::Message("SIP 401 ohne Digest-Nonce".to_string()))?;
+    let uri = format!("sip:{domain}");
+    let qop = challenge.get("qop").and_then(|value| {
+        value
+            .split(',')
+            .map(str::trim)
+            .find(|candidate| *candidate == "auth")
+    });
+    let ha1 = md5_hex(&format!("{extension}:{realm}:{password}"));
+    let ha2 = md5_hex(&format!("REGISTER:{uri}"));
+    if let Some(qop) = qop {
+        let nc = "00000001";
+        let cnonce = sip_token("cn");
+        let response = md5_hex(&format!("{ha1}:{nonce}:{nc}:{cnonce}:{qop}:{ha2}"));
+        Ok(format!(
+            "Digest username=\"{extension}\", realm=\"{realm}\", nonce=\"{nonce}\", uri=\"{uri}\", response=\"{response}\", algorithm=MD5, qop={qop}, nc={nc}, cnonce=\"{cnonce}\""
+        ))
+    } else {
+        let response = md5_hex(&format!("{ha1}:{nonce}:{ha2}"));
+        Ok(format!(
+            "Digest username=\"{extension}\", realm=\"{realm}\", nonce=\"{nonce}\", uri=\"{uri}\", response=\"{response}\", algorithm=MD5"
+        ))
+    }
+}
+
+fn receive_sip_response(socket: &UdpSocket) -> Result<String, AppError> {
+    let mut buf = [0_u8; 8192];
+    let len = socket
+        .recv(&mut buf)
+        .map_err(|error| AppError::Message(format!("SIP UDP Antwort fehlgeschlagen: {error}")))?;
+    Ok(String::from_utf8_lossy(&buf[..len]).into_owned())
+}
+
+fn sip_register_udp(
+    sip_server: &str,
+    sip_extension: &str,
+    display_name: &str,
+    password: &str,
+) -> Result<NativeSipStatus, AppError> {
+    let domain = normalize_domain(sip_server);
+    let (host, port) = sip_host_port(sip_server)?;
+    let remote = (host.as_str(), port)
+        .to_socket_addrs()
+        .map_err(|error| {
+            AppError::Message(format!(
+                "SIP-Server konnte nicht aufgeloest werden: {host}:{port}: {error}"
+            ))
+        })?
+        .next()
+        .ok_or_else(|| {
+            AppError::Message(format!(
+                "SIP-Server hat keine Adresse geliefert: {host}:{port}"
+            ))
+        })?;
+    let socket = UdpSocket::bind("0.0.0.0:0").map_err(|error| {
+        AppError::Message(format!(
+            "SIP UDP Socket konnte nicht erstellt werden: {error}"
+        ))
+    })?;
+    socket
+        .set_read_timeout(Some(Duration::from_secs(8)))
+        .map_err(|error| {
+            AppError::Message(format!("SIP Timeout konnte nicht gesetzt werden: {error}"))
+        })?;
+    socket.connect(remote).map_err(|error| {
+        AppError::Message(format!(
+            "SIP UDP Verbindung zu {remote} fehlgeschlagen: {error}"
+        ))
+    })?;
+    let local_addr = socket
+        .local_addr()
+        .map_err(|error| {
+            AppError::Message(format!(
+                "Lokale SIP-Adresse konnte nicht ermittelt werden: {error}"
+            ))
+        })?
+        .to_string();
+    let branch = sip_token("z9hG4bK");
+    let tag = sip_token("tag");
+    let call_id = format!("{}@{}", sip_token("call"), local_addr.replace(':', "-"));
+    let first = sip_register_message(
+        &domain,
+        sip_extension,
+        display_name,
+        &local_addr,
+        &branch,
+        &tag,
+        &call_id,
+        1,
+        None,
+    );
+    socket.send(first.as_bytes()).map_err(|error| {
+        AppError::Message(format!(
+            "SIP REGISTER konnte nicht gesendet werden: {error}"
+        ))
+    })?;
+    let first_response = receive_sip_response(&socket)?;
+    let (first_code, first_reason) = parse_sip_status(&first_response).ok_or_else(|| {
+        AppError::Message(format!(
+            "SIP Antwort konnte nicht gelesen werden: {first_response}"
+        ))
+    })?;
+
+    if first_code == 200 {
+        return Ok(NativeSipStatus {
+            registered: true,
+            message: format!("SIP REGISTER OK ohne Challenge: {sip_extension}@{domain} ({first_code} {first_reason}). Nativer Anruf-Core bleibt zum Crashschutz deaktiviert."),
+        });
+    }
+    if first_code != 401 && first_code != 407 {
+        return Ok(NativeSipStatus {
+            registered: false,
+            message: format!("SIP REGISTER abgelehnt: {first_code} {first_reason} fuer {sip_extension}@{domain}."),
+        });
+    }
+
+    let challenge_header = find_sip_header(&first_response, "WWW-Authenticate")
+        .or_else(|| find_sip_header(&first_response, "Proxy-Authenticate"))
+        .ok_or_else(|| AppError::Message(format!("SIP {first_code} ohne Authenticate-Header")))?
+        .to_string();
+    let challenge = parse_digest_challenge(&challenge_header);
+    let authorization = sip_digest_authorization(sip_extension, password, &domain, &challenge)?;
+    let branch = sip_token("z9hG4bK");
+    let second = sip_register_message(
+        &domain,
+        sip_extension,
+        display_name,
+        &local_addr,
+        &branch,
+        &tag,
+        &call_id,
+        2,
+        Some(&authorization),
+    );
+    socket.send(second.as_bytes()).map_err(|error| {
+        AppError::Message(format!(
+            "SIP REGISTER mit Auth konnte nicht gesendet werden: {error}"
+        ))
+    })?;
+    let second_response = receive_sip_response(&socket)?;
+    let (second_code, second_reason) = parse_sip_status(&second_response).ok_or_else(|| {
+        AppError::Message(format!(
+            "SIP Auth-Antwort konnte nicht gelesen werden: {second_response}"
+        ))
+    })?;
+
+    Ok(NativeSipStatus {
+        registered: second_code == 200,
+        message: if second_code == 200 {
+            format!("SIP REGISTER OK: {display_name} / {sip_extension}@{domain} ({second_code} {second_reason}). App bleibt stabil; nativer Anruf-Core bleibt zum Crashschutz deaktiviert.")
+        } else {
+            format!("SIP REGISTER fehlgeschlagen: {second_code} {second_reason} fuer {sip_extension}@{domain}.")
+        },
+    })
 }
 
 fn registration_state(proxy: *mut LinphoneProxyConfig) -> (bool, String) {
@@ -201,7 +486,9 @@ fn tick_core_for(core: *mut LinphoneCore, rounds: usize, delay_ms: u64) {
     }
 }
 
-fn with_session<T>(action: impl FnOnce(&mut LinphoneSession) -> Result<T, AppError>) -> Result<T, AppError> {
+fn with_session<T>(
+    action: impl FnOnce(&mut LinphoneSession) -> Result<T, AppError>,
+) -> Result<T, AppError> {
     let mut guard = SIP_SESSION
         .lock()
         .map_err(|_| AppError::Message("SIP-Sitzung ist blockiert".to_string()))?;
@@ -216,7 +503,9 @@ fn fallback_secret_path() -> Result<PathBuf, AppError> {
         .or_else(|| std::env::var_os("LOCALAPPDATA"))
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
-        .ok_or_else(|| AppError::Message("App-Datenordner konnte nicht ermittelt werden".to_string()))?;
+        .ok_or_else(|| {
+            AppError::Message("App-Datenordner konnte nicht ermittelt werden".to_string())
+        })?;
     Ok(base.join("NIVAKO Softphone").join("secrets-fallback.json"))
 }
 
@@ -229,23 +518,39 @@ fn read_fallback_secrets() -> Result<BTreeMap<String, String>, AppError> {
     if !path.exists() {
         return Ok(BTreeMap::new());
     }
-    let text = fs::read_to_string(path).map_err(|error| AppError::Message(format!("Fallback-Credentials konnten nicht gelesen werden: {error}")))?;
-    serde_json::from_str(&text).map_err(|error| AppError::Message(format!("Fallback-Credentials sind unlesbar: {error}")))
+    let text = fs::read_to_string(path).map_err(|error| {
+        AppError::Message(format!(
+            "Fallback-Credentials konnten nicht gelesen werden: {error}"
+        ))
+    })?;
+    serde_json::from_str(&text)
+        .map_err(|error| AppError::Message(format!("Fallback-Credentials sind unlesbar: {error}")))
 }
 
 fn write_fallback_secret(service: &str, account: &str, password: &str) -> Result<(), AppError> {
     let path = fallback_secret_path()?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| AppError::Message(format!("Fallback-Credential-Ordner konnte nicht erstellt werden: {error}")))?;
+        fs::create_dir_all(parent).map_err(|error| {
+            AppError::Message(format!(
+                "Fallback-Credential-Ordner konnte nicht erstellt werden: {error}"
+            ))
+        })?;
     }
     let mut secrets = read_fallback_secrets()?;
     secrets.insert(
         fallback_secret_key(service, account),
         base64::engine::general_purpose::STANDARD.encode(password),
     );
-    let text = serde_json::to_string_pretty(&secrets)
-        .map_err(|error| AppError::Message(format!("Fallback-Credentials konnten nicht serialisiert werden: {error}")))?;
-    fs::write(path, text).map_err(|error| AppError::Message(format!("Fallback-Credentials konnten nicht gespeichert werden: {error}")))
+    let text = serde_json::to_string_pretty(&secrets).map_err(|error| {
+        AppError::Message(format!(
+            "Fallback-Credentials konnten nicht serialisiert werden: {error}"
+        ))
+    })?;
+    fs::write(path, text).map_err(|error| {
+        AppError::Message(format!(
+            "Fallback-Credentials konnten nicht gespeichert werden: {error}"
+        ))
+    })
 }
 
 fn read_fallback_secret(service: &str, account: &str) -> Result<Option<String>, AppError> {
@@ -255,8 +560,12 @@ fn read_fallback_secret(service: &str, account: &str) -> Result<Option<String>, 
     };
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(encoded)
-        .map_err(|error| AppError::Message(format!("Fallback-Credential ist beschaedigt: {error}")))?;
-    String::from_utf8(bytes).map(Some).map_err(|error| AppError::Message(format!("Fallback-Credential ist kein UTF-8: {error}")))
+        .map_err(|error| {
+            AppError::Message(format!("Fallback-Credential ist beschaedigt: {error}"))
+        })?;
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|error| AppError::Message(format!("Fallback-Credential ist kein UTF-8: {error}")))
 }
 
 fn keyring_secret(service: &str, account: &str) -> Result<Option<String>, AppError> {
@@ -276,7 +585,11 @@ fn keyring_secret(service: &str, account: &str) -> Result<Option<String>, AppErr
     }
 }
 
-fn stored_or_supplied_secret(service: &str, account: &str, supplied: Option<String>) -> Result<String, AppError> {
+fn stored_or_supplied_secret(
+    service: &str,
+    account: &str,
+    supplied: Option<String>,
+) -> Result<String, AppError> {
     if let Some(password) = supplied.filter(|value| !value.is_empty()) {
         let _ = write_fallback_secret(service, account, &password);
         return Ok(password);
@@ -318,14 +631,19 @@ fn carddav_candidate_urls(url: &str, username: &str) -> Vec<String> {
 
     let lower_user = username.to_lowercase();
     if username != lower_user {
-        candidates.push(direct.replace(&format!("/users/{username}/"), &format!("/users/{lower_user}/")));
+        candidates.push(direct.replace(
+            &format!("/users/{username}/"),
+            &format!("/users/{lower_user}/"),
+        ));
     }
 
     if let Ok(parsed) = reqwest::Url::parse(&direct) {
         let origin = parsed.origin().ascii_serialization();
         for user in [username.to_string(), lower_user.clone()] {
             for book in ["nivako-crm", "contacts", "kontakte"] {
-                candidates.push(format!("{origin}/remote.php/dav/addressbooks/users/{user}/{book}/"));
+                candidates.push(format!(
+                    "{origin}/remote.php/dav/addressbooks/users/{user}/{book}/"
+                ));
             }
         }
     }
@@ -334,8 +652,13 @@ fn carddav_candidate_urls(url: &str, username: &str) -> Vec<String> {
     candidates
 }
 
-fn report_carddav_url(client: &reqwest::blocking::Client, url: &str, auth: &str) -> Result<Option<String>, AppError> {
-    let method = reqwest::Method::from_bytes(b"REPORT").map_err(|error| AppError::Message(error.to_string()))?;
+fn report_carddav_url(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    auth: &str,
+) -> Result<Option<String>, AppError> {
+    let method = reqwest::Method::from_bytes(b"REPORT")
+        .map_err(|error| AppError::Message(error.to_string()))?;
     let response = client
         .request(method, url)
         .header("Authorization", format!("Basic {auth}"))
@@ -350,7 +673,9 @@ fn report_carddav_url(client: &reqwest::blocking::Client, url: &str, auth: &str)
         return Ok(Some(text));
     }
     if status.as_u16() == 401 || status.as_u16() == 403 {
-        return Err(AppError::Message(format!("CardDAV HTTP {status}: Zugangsdaten abgelehnt")));
+        return Err(AppError::Message(format!(
+            "CardDAV HTTP {status}: Zugangsdaten abgelehnt"
+        )));
     }
     Ok(None)
 }
@@ -392,7 +717,11 @@ fn has_secret(service: String, account: String) -> Result<bool, AppError> {
 }
 
 #[tauri::command]
-fn sync_carddav(url: String, username: String, password: Option<String>) -> Result<CardDavSyncResult, AppError> {
+fn sync_carddav(
+    url: String,
+    username: String,
+    password: Option<String>,
+) -> Result<CardDavSyncResult, AppError> {
     let password = stored_or_supplied_secret(CARDDAV_SERVICE, &username, password)?;
     let auth = base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
     let client = reqwest::blocking::Client::builder()
@@ -422,99 +751,27 @@ fn sync_carddav(url: String, username: String, password: Option<String>) -> Resu
 }
 
 #[tauri::command]
-fn sip_register(sip_server: String, sip_extension: String, display_name: String, password: Option<String>) -> Result<NativeSipStatus, AppError> {
+fn sip_register(
+    sip_server: String,
+    sip_extension: String,
+    display_name: String,
+    password: Option<String>,
+) -> Result<NativeSipStatus, AppError> {
     let password = stored_or_supplied_secret(SIP_SERVICE, &sip_extension, password)?;
-    let domain = normalize_domain(&sip_server);
-    let server_addr = normalize_sip_server(&sip_server);
-    let identity = format!("sip:{sip_extension}@{domain}");
-    let username = cstring(&sip_extension, "SIP-Benutzer")?;
-    let passwd = cstring(&password, "SIP-Passwort")?;
-    let c_domain = cstring(&domain, "SIP-Domain")?;
-    let c_identity = cstring(&identity, "SIP-Identitaet")?;
-    let c_server = cstring(&server_addr, "SIP-Server")?;
-
-    let core = unsafe { linphone_core_new(ptr::null(), ptr::null(), ptr::null(), ptr::null_mut()) };
-    if core.is_null() {
-        return Err(AppError::Message("liblinphone Core konnte nicht erstellt werden".to_string()));
-    }
-
-    let result: Result<*mut LinphoneProxyConfig, AppError> = unsafe {
-        let auth = linphone_auth_info_new(
-            username.as_ptr(),
-            ptr::null(),
-            passwd.as_ptr(),
-            ptr::null(),
-            ptr::null(),
-            c_domain.as_ptr(),
-        );
-        if auth.is_null() {
-            linphone_core_unref(core);
-            return Err(AppError::Message("SIP-Auth konnte nicht erstellt werden".to_string()));
-        }
-        linphone_core_add_auth_info(core, auth);
-        linphone_auth_info_unref(auth);
-
-        let proxy = linphone_core_create_proxy_config(core);
-        if proxy.is_null() {
-            linphone_core_unref(core);
-            return Err(AppError::Message("SIP-Proxy konnte nicht erstellt werden".to_string()));
-        }
-
-        let address = linphone_address_new(c_identity.as_ptr());
-        if address.is_null() {
-            linphone_core_unref(core);
-            return Err(AppError::Message(format!("Ungueltige SIP-Identitaet: {identity}")));
-        }
-
-        let identity_status = linphone_proxy_config_set_identity_address(proxy, address);
-        linphone_address_unref(address);
-        let server_status = linphone_proxy_config_set_server_addr(proxy, c_server.as_ptr());
-        linphone_proxy_config_enable_register(proxy, 1);
-        let add_status = linphone_core_add_proxy_config(core, proxy);
-        linphone_core_set_default_proxy_config(core, proxy);
-        let start_status = linphone_core_start(core);
-
-        if identity_status != 0 || server_status != 0 || add_status != 0 || start_status != 0 {
-            linphone_core_unref(core);
-            return Err(AppError::Message("SIP-Konfiguration wurde von liblinphone abgelehnt".to_string()));
-        }
-
-        Ok(proxy)
-    };
-
-    let proxy = result?;
-    let session = LinphoneSession {
-        core,
-        proxy,
-        sip_server,
-        sip_extension: sip_extension.clone(),
-        held: false,
-        muted: false,
-    };
-
-    let mut guard = SIP_SESSION
-        .lock()
-        .map_err(|_| AppError::Message("SIP-Sitzung ist blockiert".to_string()))?;
-    *guard = Some(session);
-    drop(guard);
-
-    ensure_sip_worker();
-    tick_session_for(80, 100);
-    let (registered, state_label) = with_session(|session| Ok(registration_state(session.proxy)))?;
-
-    Ok(NativeSipStatus {
-        registered,
-        message: format!(
-            "SIP-Registrierung geprueft: {display_name} / {sip_extension}@{domain}. Status: {state_label}"
-        ),
-    })
+    sip_register_udp(&sip_server, &sip_extension, &display_name, &password)
 }
 
 #[tauri::command]
-fn sip_dial(number: String, sip_server: String, sip_extension: String) -> Result<NativeSipStatus, AppError> {
+fn sip_dial(
+    number: String,
+    sip_server: String,
+    sip_extension: String,
+) -> Result<NativeSipStatus, AppError> {
     with_session(|session| {
         if session.sip_server != sip_server || session.sip_extension != sip_extension {
-            return Err(AppError::Message("SIP-Registrierung passt nicht zu den aktuellen Einstellungen".to_string()));
+            return Err(AppError::Message(
+                "SIP-Registrierung passt nicht zu den aktuellen Einstellungen".to_string(),
+            ));
         }
 
         let domain = normalize_domain(&sip_server);
@@ -536,11 +793,16 @@ fn sip_dial(number: String, sip_server: String, sip_extension: String) -> Result
         tick_core_for(session.core, 10, 100);
         let (registered, state_label) = registration_state(session.proxy);
         if call.is_null() {
-            return Err(AppError::Message(format!("Anruf konnte nicht gestartet werden. SIP-Status: {state_label}")));
+            return Err(AppError::Message(format!(
+                "Anruf konnte nicht gestartet werden. SIP-Status: {state_label}"
+            )));
         }
         Ok(NativeSipStatus {
             registered,
-            message: format!("Nativer Anruf gestartet: {} -> {number}. SIP-Status: {state_label}", session.sip_extension),
+            message: format!(
+                "Nativer Anruf gestartet: {} -> {number}. SIP-Status: {state_label}",
+                session.sip_extension
+            ),
         })
     })
 }
@@ -563,7 +825,9 @@ fn sip_hold() -> Result<NativeSipStatus, AppError> {
     with_session(|session| {
         let call = unsafe { linphone_core_get_current_call(session.core) };
         if call.is_null() {
-            return Err(AppError::Message("Kein aktiver Anruf zum Halten".to_string()));
+            return Err(AppError::Message(
+                "Kein aktiver Anruf zum Halten".to_string(),
+            ));
         }
         let status = if session.held {
             unsafe { linphone_core_resume_call(session.core, call) }
@@ -571,7 +835,9 @@ fn sip_hold() -> Result<NativeSipStatus, AppError> {
             unsafe { linphone_core_pause_call(session.core, call) }
         };
         if status != 0 {
-            return Err(AppError::Message("Halten/Fortsetzen wurde von liblinphone abgelehnt".to_string()));
+            return Err(AppError::Message(
+                "Halten/Fortsetzen wurde von liblinphone abgelehnt".to_string(),
+            ));
         }
         session.held = !session.held;
         tick_core_for(session.core, 5, 80);
@@ -610,7 +876,9 @@ fn sip_dtmf(digit: String) -> Result<NativeSipStatus, AppError> {
     with_session(|session| {
         let call = unsafe { linphone_core_get_current_call(session.core) };
         if call.is_null() {
-            return Err(AppError::Message("Kein aktiver Anruf fuer DTMF".to_string()));
+            return Err(AppError::Message(
+                "Kein aktiver Anruf fuer DTMF".to_string(),
+            ));
         }
         let dtmf = digit
             .chars()
@@ -618,7 +886,9 @@ fn sip_dtmf(digit: String) -> Result<NativeSipStatus, AppError> {
             .ok_or_else(|| AppError::Message("DTMF-Zeichen fehlt".to_string()))?;
         let status = unsafe { linphone_call_send_dtmf(call, dtmf as c_char) };
         if status != 0 {
-            return Err(AppError::Message("DTMF wurde von liblinphone abgelehnt".to_string()));
+            return Err(AppError::Message(
+                "DTMF wurde von liblinphone abgelehnt".to_string(),
+            ));
         }
         tick_core_for(session.core, 2, 60);
         let (registered, state_label) = registration_state(session.proxy);
