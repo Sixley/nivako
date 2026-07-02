@@ -12,8 +12,8 @@ import type { CallEntry, Contact, Settings, SoftphoneState } from "./types";
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.1.4";
-const buildLabel = "0.1.4 SIP-Crashschutz";
+const appVersion = "0.1.5";
+const buildLabel = "0.1.5 SIP-Digest-Auth";
 
 type View = "contacts" | "history" | "favorites" | "audio" | "settings";
 

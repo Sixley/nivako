@@ -263,10 +263,29 @@ fn parse_digest_challenge(header: &str) -> HashMap<String, String> {
     if value.to_ascii_lowercase().starts_with("digest ") {
         value = value[7..].trim();
     }
-    value
-        .split(',')
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    for char in value.chars() {
+        match char {
+            '"' => {
+                in_quotes = !in_quotes;
+                current.push(char);
+            }
+            ',' if !in_quotes => {
+                parts.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(char),
+        }
+    }
+    if !current.trim().is_empty() {
+        parts.push(current.trim().to_string());
+    }
+    parts
+        .into_iter()
         .filter_map(|part| {
-            let (key, raw_value) = part.trim().split_once('=')?;
+            let (key, raw_value) = part.split_once('=')?;
             Some((
                 key.trim().to_ascii_lowercase(),
                 raw_value.trim().trim_matches('"').to_string(),
@@ -280,7 +299,8 @@ fn md5_hex(value: &str) -> String {
 }
 
 fn sip_digest_authorization(
-    extension: &str,
+    auth_username: &str,
+    display_username: &str,
     password: &str,
     domain: &str,
     challenge: &HashMap<String, String>,
@@ -296,23 +316,50 @@ fn sip_digest_authorization(
         value
             .split(',')
             .map(str::trim)
+            .map(|candidate| candidate.trim_matches('"'))
             .find(|candidate| *candidate == "auth")
     });
-    let ha1 = md5_hex(&format!("{extension}:{realm}:{password}"));
+    let ha1 = md5_hex(&format!("{auth_username}:{realm}:{password}"));
     let ha2 = md5_hex(&format!("REGISTER:{uri}"));
     if let Some(qop) = qop {
         let nc = "00000001";
         let cnonce = sip_token("cn");
         let response = md5_hex(&format!("{ha1}:{nonce}:{nc}:{cnonce}:{qop}:{ha2}"));
         Ok(format!(
-            "Digest username=\"{extension}\", realm=\"{realm}\", nonce=\"{nonce}\", uri=\"{uri}\", response=\"{response}\", algorithm=MD5, qop={qop}, nc={nc}, cnonce=\"{cnonce}\""
+            "Digest username=\"{display_username}\", realm=\"{realm}\", nonce=\"{nonce}\", uri=\"{uri}\", response=\"{response}\", algorithm=MD5, qop={qop}, nc={nc}, cnonce=\"{cnonce}\""
         ))
     } else {
         let response = md5_hex(&format!("{ha1}:{nonce}:{ha2}"));
         Ok(format!(
-            "Digest username=\"{extension}\", realm=\"{realm}\", nonce=\"{nonce}\", uri=\"{uri}\", response=\"{response}\", algorithm=MD5"
+            "Digest username=\"{display_username}\", realm=\"{realm}\", nonce=\"{nonce}\", uri=\"{uri}\", response=\"{response}\", algorithm=MD5"
         ))
     }
+}
+
+fn sip_auth_user_candidates(extension: &str, domain: &str) -> Vec<String> {
+    let mut candidates = vec![extension.trim().to_string()];
+    if !extension.contains('@') {
+        candidates.push(format!("{}@{}", extension.trim(), domain));
+    }
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
+fn challenge_summary(challenge: &HashMap<String, String>) -> String {
+    let realm = challenge
+        .get("realm")
+        .map(String::as_str)
+        .unwrap_or("unbekannt");
+    let qop = challenge
+        .get("qop")
+        .map(String::as_str)
+        .unwrap_or("nicht angegeben");
+    let algorithm = challenge
+        .get("algorithm")
+        .map(String::as_str)
+        .unwrap_or("MD5");
+    format!("Realm {realm}, qop {qop}, Algorithmus {algorithm}")
 }
 
 fn receive_sip_response(socket: &UdpSocket) -> Result<String, AppError> {
@@ -411,38 +458,58 @@ fn sip_register_udp(
         .ok_or_else(|| AppError::Message(format!("SIP {first_code} ohne Authenticate-Header")))?
         .to_string();
     let challenge = parse_digest_challenge(&challenge_header);
-    let authorization = sip_digest_authorization(sip_extension, password, &domain, &challenge)?;
-    let branch = sip_token("z9hG4bK");
-    let second = sip_register_message(
-        &domain,
-        sip_extension,
-        display_name,
-        &local_addr,
-        &branch,
-        &tag,
-        &call_id,
-        2,
-        Some(&authorization),
-    );
-    socket.send(second.as_bytes()).map_err(|error| {
-        AppError::Message(format!(
-            "SIP REGISTER mit Auth konnte nicht gesendet werden: {error}"
-        ))
-    })?;
-    let second_response = receive_sip_response(&socket)?;
-    let (second_code, second_reason) = parse_sip_status(&second_response).ok_or_else(|| {
-        AppError::Message(format!(
-            "SIP Auth-Antwort konnte nicht gelesen werden: {second_response}"
-        ))
-    })?;
+    let mut auth_failures = Vec::new();
+    for (index, auth_username) in sip_auth_user_candidates(sip_extension, &domain)
+        .into_iter()
+        .enumerate()
+    {
+        let authorization =
+            sip_digest_authorization(&auth_username, &auth_username, password, &domain, &challenge)?;
+        let branch = sip_token("z9hG4bK");
+        let second = sip_register_message(
+            &domain,
+            sip_extension,
+            display_name,
+            &local_addr,
+            &branch,
+            &tag,
+            &call_id,
+            (index as u32) + 2,
+            Some(&authorization),
+        );
+        socket.send(second.as_bytes()).map_err(|error| {
+            AppError::Message(format!(
+                "SIP REGISTER mit Auth konnte nicht gesendet werden: {error}"
+            ))
+        })?;
+        let second_response = receive_sip_response(&socket)?;
+        let (second_code, second_reason) = parse_sip_status(&second_response).ok_or_else(|| {
+            AppError::Message(format!(
+                "SIP Auth-Antwort konnte nicht gelesen werden: {second_response}"
+            ))
+        })?;
+        if second_code == 200 {
+            return Ok(NativeSipStatus {
+                registered: true,
+                message: format!("SIP REGISTER OK: {display_name} / {sip_extension}@{domain} ({second_code} {second_reason}) mit Auth-User {auth_username}. App bleibt stabil; nativer Anruf-Core bleibt zum Crashschutz deaktiviert."),
+            });
+        }
+        auth_failures.push(format!("{auth_username}: {second_code} {second_reason}"));
+        if second_code != 401 && second_code != 407 {
+            return Ok(NativeSipStatus {
+                registered: false,
+                message: format!("SIP REGISTER abgelehnt: {second_code} {second_reason} fuer {sip_extension}@{domain} mit Auth-User {auth_username}."),
+            });
+        }
+    }
 
     Ok(NativeSipStatus {
-        registered: second_code == 200,
-        message: if second_code == 200 {
-            format!("SIP REGISTER OK: {display_name} / {sip_extension}@{domain} ({second_code} {second_reason}). App bleibt stabil; nativer Anruf-Core bleibt zum Crashschutz deaktiviert.")
-        } else {
-            format!("SIP REGISTER fehlgeschlagen: {second_code} {second_reason} fuer {sip_extension}@{domain}.")
-        },
+        registered: false,
+        message: format!(
+            "SIP REGISTER fehlgeschlagen: Auth-Challenge beantwortet, aber PBX lehnt weiter ab. {}. Versucht: {}. Bitte SIP-Benutzer/Auth-ID und SIP-Passwort pruefen.",
+            challenge_summary(&challenge),
+            auth_failures.join(", ")
+        ),
     })
 }
 
@@ -914,4 +981,29 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running NIVAKO Softphone");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_digest_challenge_with_quoted_commas() {
+        let challenge = parse_digest_challenge(
+            "Digest realm=\"asterisk\", nonce=\"abc123\", qop=\"auth,auth-int\", algorithm=MD5",
+        );
+
+        assert_eq!(challenge.get("realm").map(String::as_str), Some("asterisk"));
+        assert_eq!(challenge.get("nonce").map(String::as_str), Some("abc123"));
+        assert_eq!(challenge.get("qop").map(String::as_str), Some("auth,auth-int"));
+        assert_eq!(challenge.get("algorithm").map(String::as_str), Some("MD5"));
+    }
+
+    #[test]
+    fn sip_auth_candidates_include_extension_and_full_user() {
+        assert_eq!(
+            sip_auth_user_candidates("101", "pbx.nivako.de"),
+            vec!["101".to_string(), "101@pbx.nivako.de".to_string()]
+        );
+    }
 }
