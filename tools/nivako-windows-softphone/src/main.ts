@@ -12,8 +12,8 @@ import type { CallEntry, Contact, Settings, SoftphoneState } from "./types";
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.1.2";
-const buildLabel = "0.1.2 Fehlerdetails";
+const appVersion = "0.1.3";
+const buildLabel = "0.1.3 Credential-Fallback";
 
 type View = "contacts" | "history" | "favorites" | "audio" | "settings";
 

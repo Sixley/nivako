@@ -1,8 +1,11 @@
 use base64::Engine;
 use once_cell::sync::Lazy;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};
+use std::fs;
 use std::os::raw::{c_char, c_int, c_void};
+use std::path::PathBuf;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -208,11 +211,85 @@ fn with_session<T>(action: impl FnOnce(&mut LinphoneSession) -> Result<T, AppErr
     action(session)
 }
 
+fn fallback_secret_path() -> Result<PathBuf, AppError> {
+    let base = std::env::var_os("APPDATA")
+        .or_else(|| std::env::var_os("LOCALAPPDATA"))
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .ok_or_else(|| AppError::Message("App-Datenordner konnte nicht ermittelt werden".to_string()))?;
+    Ok(base.join("NIVAKO Softphone").join("secrets-fallback.json"))
+}
+
+fn fallback_secret_key(service: &str, account: &str) -> String {
+    base64::engine::general_purpose::STANDARD.encode(format!("{service}\n{account}"))
+}
+
+fn read_fallback_secrets() -> Result<BTreeMap<String, String>, AppError> {
+    let path = fallback_secret_path()?;
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let text = fs::read_to_string(path).map_err(|error| AppError::Message(format!("Fallback-Credentials konnten nicht gelesen werden: {error}")))?;
+    serde_json::from_str(&text).map_err(|error| AppError::Message(format!("Fallback-Credentials sind unlesbar: {error}")))
+}
+
+fn write_fallback_secret(service: &str, account: &str, password: &str) -> Result<(), AppError> {
+    let path = fallback_secret_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| AppError::Message(format!("Fallback-Credential-Ordner konnte nicht erstellt werden: {error}")))?;
+    }
+    let mut secrets = read_fallback_secrets()?;
+    secrets.insert(
+        fallback_secret_key(service, account),
+        base64::engine::general_purpose::STANDARD.encode(password),
+    );
+    let text = serde_json::to_string_pretty(&secrets)
+        .map_err(|error| AppError::Message(format!("Fallback-Credentials konnten nicht serialisiert werden: {error}")))?;
+    fs::write(path, text).map_err(|error| AppError::Message(format!("Fallback-Credentials konnten nicht gespeichert werden: {error}")))
+}
+
+fn read_fallback_secret(service: &str, account: &str) -> Result<Option<String>, AppError> {
+    let secrets = read_fallback_secrets()?;
+    let Some(encoded) = secrets.get(&fallback_secret_key(service, account)) else {
+        return Ok(None);
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|error| AppError::Message(format!("Fallback-Credential ist beschaedigt: {error}")))?;
+    String::from_utf8(bytes).map(Some).map_err(|error| AppError::Message(format!("Fallback-Credential ist kein UTF-8: {error}")))
+}
+
+fn keyring_secret(service: &str, account: &str) -> Result<Option<String>, AppError> {
+    let entry = match keyring::Entry::new(service, account) {
+        Ok(entry) => entry,
+        Err(error) => {
+            eprintln!("Windows Credential Manager nicht verfuegbar: {error}");
+            return Ok(None);
+        }
+    };
+    match entry.get_password() {
+        Ok(password) => Ok(Some(password)),
+        Err(error) => {
+            eprintln!("Windows Credential Manager lieferte kein Passwort: {error}");
+            Ok(None)
+        }
+    }
+}
+
 fn stored_or_supplied_secret(service: &str, account: &str, supplied: Option<String>) -> Result<String, AppError> {
     if let Some(password) = supplied.filter(|value| !value.is_empty()) {
+        let _ = write_fallback_secret(service, account, &password);
         return Ok(password);
     }
-    keyring::Entry::new(service, account)?.get_password().map_err(AppError::from)
+    if let Some(password) = keyring_secret(service, account)? {
+        return Ok(password);
+    }
+    if let Some(password) = read_fallback_secret(service, account)? {
+        return Ok(password);
+    }
+    Err(AppError::Message(format!(
+        "Passwort fehlt fuer {service} / {account}. Bitte in den Einstellungen erneut eintragen und speichern."
+    )))
 }
 
 fn carddav_query_body() -> &'static str {
@@ -280,22 +357,38 @@ fn report_carddav_url(client: &reqwest::blocking::Client, url: &str, auth: &str)
 
 #[tauri::command]
 fn save_secret(service: String, account: String, password: String) -> Result<(), AppError> {
-    let entry = keyring::Entry::new(&service, &account)?;
-    entry.set_password(&password)?;
-    let stored = entry.get_password()?;
-    if stored != password {
-        return Err(AppError::Message("Credential wurde gespeichert, aber die Rueckpruefung ist fehlgeschlagen".to_string()));
+    write_fallback_secret(&service, &account, &password)?;
+    match keyring::Entry::new(&service, &account) {
+        Ok(entry) => {
+            if let Err(error) = entry.set_password(&password) {
+                eprintln!("Windows Credential Manager konnte nicht speichern: {error}; App-Fallback wurde gespeichert");
+                return Ok(());
+            }
+            match entry.get_password() {
+                Ok(stored) if stored == password => Ok(()),
+                Ok(_) => {
+                    eprintln!("Windows Credential Manager Rueckpruefung ist fehlgeschlagen; App-Fallback wurde gespeichert");
+                    Ok(())
+                }
+                Err(error) => {
+                    eprintln!("Windows Credential Manager Rueckpruefung fehlgeschlagen: {error}; App-Fallback wurde gespeichert");
+                    Ok(())
+                }
+            }
+        }
+        Err(error) => {
+            eprintln!("Windows Credential Manager nicht verfuegbar: {error}; App-Fallback wurde gespeichert");
+            Ok(())
+        }
     }
-    Ok(())
 }
 
 #[tauri::command]
 fn has_secret(service: String, account: String) -> Result<bool, AppError> {
-    match keyring::Entry::new(&service, &account)?.get_password() {
-        Ok(_) => Ok(true),
-        Err(keyring::Error::NoEntry) => Ok(false),
-        Err(error) => Err(error.into()),
+    if keyring_secret(&service, &account)?.is_some() {
+        return Ok(true);
     }
+    Ok(read_fallback_secret(&service, &account)?.is_some())
 }
 
 #[tauri::command]
