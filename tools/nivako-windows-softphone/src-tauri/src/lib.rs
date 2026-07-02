@@ -168,9 +168,21 @@ fn with_session<T>(action: impl FnOnce(&mut LinphoneSession) -> Result<T, AppErr
     action(session)
 }
 
+fn stored_or_supplied_secret(service: &str, account: &str, supplied: Option<String>) -> Result<String, AppError> {
+    if let Some(password) = supplied.filter(|value| !value.is_empty()) {
+        return Ok(password);
+    }
+    keyring::Entry::new(service, account)?.get_password().map_err(AppError::from)
+}
+
 #[tauri::command]
 fn save_secret(service: String, account: String, password: String) -> Result<(), AppError> {
-    keyring::Entry::new(&service, &account)?.set_password(&password)?;
+    let entry = keyring::Entry::new(&service, &account)?;
+    entry.set_password(&password)?;
+    let stored = entry.get_password()?;
+    if stored != password {
+        return Err(AppError::Message("Credential wurde gespeichert, aber die Rueckpruefung ist fehlgeschlagen".to_string()));
+    }
     Ok(())
 }
 
@@ -184,8 +196,8 @@ fn has_secret(service: String, account: String) -> Result<bool, AppError> {
 }
 
 #[tauri::command]
-fn sync_carddav(url: String, username: String) -> Result<String, AppError> {
-    let password = keyring::Entry::new(CARDDAV_SERVICE, &username)?.get_password()?;
+fn sync_carddav(url: String, username: String, password: Option<String>) -> Result<String, AppError> {
+    let password = stored_or_supplied_secret(CARDDAV_SERVICE, &username, password)?;
     let body = r#"<?xml version="1.0" encoding="UTF-8"?>
 <card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
   <d:prop>
@@ -214,8 +226,8 @@ fn sync_carddav(url: String, username: String) -> Result<String, AppError> {
 }
 
 #[tauri::command]
-fn sip_register(sip_server: String, sip_extension: String, display_name: String) -> Result<NativeSipStatus, AppError> {
-    let password = keyring::Entry::new(SIP_SERVICE, &sip_extension)?.get_password()?;
+fn sip_register(sip_server: String, sip_extension: String, display_name: String, password: Option<String>) -> Result<NativeSipStatus, AppError> {
+    let password = stored_or_supplied_secret(SIP_SERVICE, &sip_extension, password)?;
     let domain = normalize_domain(&sip_server);
     let server_addr = normalize_sip_server(&sip_server);
     let identity = format!("sip:{sip_extension}@{domain}");
