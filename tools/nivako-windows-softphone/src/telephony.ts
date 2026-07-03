@@ -12,6 +12,7 @@ export interface SipRegistrationConfig {
   webSocketUrl: string;
   sipServer: string;
   extension: string;
+  authUser: string;
   password: string;
   displayName?: string;
 }
@@ -63,6 +64,7 @@ export class WebRtcSipAdapter implements TelephonyAdapter {
     this.ua = new JsSIP.UA({
       sockets: [socket],
       uri: `sip:${this.config.extension}@${this.config.sipServer}`,
+      authorization_user: this.config.authUser || this.config.extension,
       password: this.config.password,
       display_name: this.config.displayName || this.config.extension,
       register: true

@@ -39,6 +39,7 @@ export interface Settings {
   cardDavUser: string;
   sipServer: string;
   sipExtension: string;
+  sipAuthUser: string;
   sipWebSocketUrl: string;
   sipDisplayName: string;
   allowedTestNumbers: string;

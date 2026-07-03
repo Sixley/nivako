@@ -373,6 +373,7 @@ fn receive_sip_response(socket: &UdpSocket) -> Result<String, AppError> {
 fn sip_register_udp(
     sip_server: &str,
     sip_extension: &str,
+    sip_auth_user: &str,
     display_name: &str,
     password: &str,
 ) -> Result<NativeSipStatus, AppError> {
@@ -459,10 +460,12 @@ fn sip_register_udp(
         .to_string();
     let challenge = parse_digest_challenge(&challenge_header);
     let mut auth_failures = Vec::new();
-    for (index, auth_username) in sip_auth_user_candidates(sip_extension, &domain)
-        .into_iter()
-        .enumerate()
-    {
+    let mut auth_candidates = vec![sip_auth_user.trim().to_string()];
+    auth_candidates.extend(sip_auth_user_candidates(sip_extension, &domain));
+    auth_candidates.retain(|candidate| !candidate.is_empty());
+    auth_candidates.sort();
+    auth_candidates.dedup();
+    for (index, auth_username) in auth_candidates.into_iter().enumerate() {
         let authorization =
             sip_digest_authorization(&auth_username, &auth_username, password, &domain, &challenge)?;
         let branch = sip_token("z9hG4bK");
@@ -784,6 +787,14 @@ fn has_secret(service: String, account: String) -> Result<bool, AppError> {
 }
 
 #[tauri::command]
+fn get_secret(service: String, account: String) -> Result<Option<String>, AppError> {
+    if let Some(password) = keyring_secret(&service, &account)? {
+        return Ok(Some(password));
+    }
+    read_fallback_secret(&service, &account)
+}
+
+#[tauri::command]
 fn sync_carddav(
     url: String,
     username: String,
@@ -821,11 +832,18 @@ fn sync_carddav(
 fn sip_register(
     sip_server: String,
     sip_extension: String,
+    sip_auth_user: String,
     display_name: String,
     password: Option<String>,
 ) -> Result<NativeSipStatus, AppError> {
     let password = stored_or_supplied_secret(SIP_SERVICE, &sip_extension, password)?;
-    sip_register_udp(&sip_server, &sip_extension, &display_name, &password)
+    sip_register_udp(
+        &sip_server,
+        &sip_extension,
+        &sip_auth_user,
+        &display_name,
+        &password,
+    )
 }
 
 #[tauri::command]
@@ -971,6 +989,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             save_secret,
             has_secret,
+            get_secret,
             sync_carddav,
             sip_register,
             sip_dial,

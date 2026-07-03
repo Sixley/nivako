@@ -2,7 +2,7 @@ import "./styles.css";
 import { loadAudioDevices, type AudioDeviceState } from "./audioDevices";
 import { parseManyVCards } from "./carddav";
 import { syncCardDavContacts } from "./contactsRepository";
-import { getLastCardDavDiagnostic, hasSecretNative, isTauriRuntime, saveSecretNative } from "./nativeBridge";
+import { getLastCardDavDiagnostic, hasSecretNative, isTauriRuntime, loadSecretNative, saveSecretNative } from "./nativeBridge";
 import { canUseNativeTelephony, NativeTelephonyAdapter } from "./nativeTelephony";
 import { searchContacts } from "./search";
 import { loadContacts, loadFavoriteIds, loadHistory, loadSettings, saveContacts, saveFavoriteIds, saveHistory, saveSettings } from "./storage";
@@ -12,8 +12,8 @@ import type { CallEntry, Contact, Settings, SoftphoneState } from "./types";
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.1.5";
-const buildLabel = "0.1.5 SIP-Digest-Auth";
+const appVersion = "0.1.6";
+const buildLabel = "0.1.6 SIP-WebRTC-Telefonie";
 
 type View = "contacts" | "history" | "favorites" | "audio" | "settings";
 
@@ -22,25 +22,32 @@ const defaultSettings: Settings = {
   cardDavUser: "Nivako",
   sipServer: import.meta.env.VITE_SIP_DOMAIN || "pbx.nivako.de",
   sipExtension: import.meta.env.VITE_SIP_EXTENSION || "101",
+  sipAuthUser: import.meta.env.VITE_SIP_AUTH_USER || "101",
   sipWebSocketUrl: "wss://pbx.nivako.de:8089/ws",
   sipDisplayName: "NIVAKO 101",
   allowedTestNumbers: isTauriRuntime() ? "" : "101,*43",
   safeCallMode: !isTauriRuntime(),
   useTelLinks: false,
-  enableWebRtcSip: false,
+  enableWebRtcSip: isTauriRuntime(),
   selectedMicrophoneId: "",
   selectedSpeakerId: ""
 };
 
 let settings = loadSettings(defaultSettings);
-if (isTauriRuntime() && !localStorage.getItem("nivako-softphone.desktop-defaults-v1")) {
+settings = {
+  ...settings,
+  sipAuthUser: settings.sipAuthUser || settings.sipExtension
+};
+if (isTauriRuntime() && !localStorage.getItem("nivako-softphone.desktop-webrtc-v1")) {
   settings = {
     ...settings,
     allowedTestNumbers: settings.allowedTestNumbers === "101,*43" ? "" : settings.allowedTestNumbers,
-    safeCallMode: false
+    safeCallMode: false,
+    enableWebRtcSip: true,
+    sipAuthUser: settings.sipAuthUser || settings.sipExtension
   };
   saveSettings(settings);
-  localStorage.setItem("nivako-softphone.desktop-defaults-v1", "1");
+  localStorage.setItem("nivako-softphone.desktop-webrtc-v1", "1");
 }
 let telephony: TelephonyAdapter = new SafeTelephonyAdapter(() => settings.useTelLinks && !settings.safeCallMode);
 let contacts = applyFavorites(loadContacts([]), loadFavoriteIds());
@@ -118,6 +125,23 @@ async function refreshAudioDevices(requestPermission = false): Promise<void> {
 }
 
 function configureTelephony(): void {
+  if (settings.enableWebRtcSip) {
+    telephony = new WebRtcSipAdapter({
+      webSocketUrl: settings.sipWebSocketUrl,
+      sipServer: settings.sipServer,
+      extension: settings.sipExtension,
+      authUser: settings.sipAuthUser || settings.sipExtension,
+      password: sipPassword,
+      displayName: settings.sipDisplayName
+    }, (status, registered) => {
+      sipNotice = status;
+      state = { ...state, registered: registered ?? state.registered };
+      notice = status;
+      render();
+    }, mediaConstraints);
+    return;
+  }
+
   if (canUseNativeTelephony()) {
     telephony = new NativeTelephonyAdapter(() => settings, () => sipPassword, (status, registered) => {
       sipNotice = status;
@@ -128,27 +152,14 @@ function configureTelephony(): void {
     return;
   }
 
-  if (!settings.enableWebRtcSip) {
-    telephony = new SafeTelephonyAdapter(() => settings.useTelLinks && !settings.safeCallMode);
-    return;
-  }
-
-  telephony = new WebRtcSipAdapter({
-    webSocketUrl: settings.sipWebSocketUrl,
-    sipServer: settings.sipServer,
-    extension: settings.sipExtension,
-    password: sipPassword,
-    displayName: settings.sipDisplayName
-  }, (status, registered) => {
-    sipNotice = status;
-    state = { ...state, registered: registered ?? state.registered };
-    notice = status;
-    render();
-  }, mediaConstraints);
+  telephony = new SafeTelephonyAdapter(() => settings.useTelLinks && !settings.safeCallMode);
 }
 
 async function registerSip(): Promise<void> {
   try {
+    if (settings.enableWebRtcSip && isTauriRuntime() && !sipPassword && hasStoredSipPassword) {
+      sipPassword = await loadSecretNative("NIVAKO Softphone SIP", settings.sipExtension) || "";
+    }
     configureTelephony();
     await telephony.register();
   } catch (error) {
@@ -182,7 +193,7 @@ function addHistory(direction: CallEntry["direction"], number: string, name = nu
 
 async function dial(): Promise<void> {
   if (!state.activeNumber) return;
-  const nativeTelephony = canUseNativeTelephony();
+  const realSipTelephony = settings.enableWebRtcSip || canUseNativeTelephony();
   if (settings.safeCallMode) {
     notice = "Anrufschutz aktiv: Es wurde kein echter Anruf gestartet.";
     addHistory("outbound", state.activeNumber, state.activeContact?.displayName || state.activeNumber, "blocked");
@@ -190,7 +201,7 @@ async function dial(): Promise<void> {
     return;
   }
 
-  if (!nativeTelephony && settings.enableWebRtcSip && !isNumberAllowed(state.activeNumber)) {
+  if (!realSipTelephony && settings.enableWebRtcSip && !isNumberAllowed(state.activeNumber)) {
     notice = `Anruf blockiert: ${state.activeNumber} ist nicht in den erlaubten Testnummern.`;
     addHistory("outbound", state.activeNumber, state.activeContact?.displayName || state.activeNumber, "blocked");
     render();
@@ -202,7 +213,7 @@ async function dial(): Promise<void> {
     await telephony.dial(state.activeNumber);
     addHistory("outbound", state.activeNumber, state.activeContact?.displayName || state.activeNumber, "started");
     state = { ...state, callState: "active" };
-    notice = nativeTelephony
+    notice = realSipTelephony
       ? "SIP-Anruf gestartet."
       : settings.enableWebRtcSip
       ? "SIP-Anruf gestartet."
@@ -421,13 +432,14 @@ function renderMainPanel(visibleContacts: Contact[]): string {
           <label><span>CardDAV Passwort ${isTauriRuntime() && hasStoredCardDavPassword ? "(gespeichert)" : ""}</span><input name="cardDavPassword" type="password" value="${escapeHtml(cardDavPassword)}" autocomplete="off" /></label>
           <label><span>SIP-Server</span><input name="sipServer" value="${escapeHtml(settings.sipServer)}" /></label>
           <label><span>SIP-Benutzer</span><input name="sipExtension" value="${escapeHtml(settings.sipExtension)}" /></label>
+          <label><span>SIP Auth-ID</span><input name="sipAuthUser" value="${escapeHtml(settings.sipAuthUser || settings.sipExtension)}" /></label>
           <label><span>SIP Anzeigename</span><input name="sipDisplayName" value="${escapeHtml(settings.sipDisplayName)}" /></label>
           <label><span>SIP WebSocket</span><input name="sipWebSocketUrl" value="${escapeHtml(settings.sipWebSocketUrl)}" /></label>
           <label><span>Erlaubte Testnummern</span><input name="allowedTestNumbers" value="${escapeHtml(settings.allowedTestNumbers)}" /></label>
           <label><span>SIP Passwort ${isTauriRuntime() && hasStoredSipPassword ? "(gespeichert)" : "nur fuer diese Sitzung"}</span><input name="sipPassword" type="password" value="${escapeHtml(sipPassword)}" autocomplete="off" /></label>
           <label class="check-row"><input type="checkbox" name="safeCallMode" ${settings.safeCallMode ? "checked" : ""} /><span>Anrufschutz aktiv</span></label>
           <label class="check-row"><input type="checkbox" name="useTelLinks" ${settings.useTelLinks ? "checked" : ""} /><span>Ausgehende Anrufe an Windows tel:-Handler uebergeben</span></label>
-          <label class="check-row"><input type="checkbox" name="enableWebRtcSip" ${settings.enableWebRtcSip ? "checked" : ""} /><span>Browser-SIP ueber WebRTC/WebSocket aktivieren</span></label>
+          <label class="check-row"><input type="checkbox" name="enableWebRtcSip" ${settings.enableWebRtcSip ? "checked" : ""} /><span>SIP ueber WebRTC/WebSocket aktivieren</span></label>
           <button class="primary" type="submit">Speichern</button>
         </form>
       </section>
@@ -461,8 +473,8 @@ function navButton(view: View, label: string): string {
 function telephonyStatusText(): string {
   if (state.registered) return "SIP registriert";
   if (settings.safeCallMode) return "Anrufschutz aktiv";
+  if (settings.enableWebRtcSip) return "SIP-WebRTC bereit";
   if (canUseNativeTelephony()) return "Desktop-SIP bereit";
-  if (settings.enableWebRtcSip) return "SIP bereit zur Registrierung";
   if (settings.useTelLinks) return "tel:-Uebergabe aktiv";
   return "SIP-Core fehlt";
 }
@@ -517,7 +529,7 @@ function render(): void {
             <button class="secondary" id="hold" ${state.callState === "idle" ? "disabled" : ""}>${state.callState === "held" ? "Weiter" : "Halten"}</button>
             <button class="secondary" id="mute" ${state.callState === "idle" ? "disabled" : ""}>${state.muted ? "Mikro an" : "Stumm"}</button>
           </div>
-          <div class="sip-note">${escapeHtml(canUseNativeTelephony() ? "Desktop-Modus" : "Browser-Modus")} · ${escapeHtml(sipNotice)} · Testnummern: ${escapeHtml(settings.allowedTestNumbers || "keine")}</div>
+          <div class="sip-note">${escapeHtml(settings.enableWebRtcSip ? "WebRTC/WSS" : canUseNativeTelephony() ? "UDP-Diagnose" : "Browser-Modus")} · ${escapeHtml(sipNotice)} · Testnummern: ${escapeHtml(settings.allowedTestNumbers || "keine")}</div>
           <div class="sip-note">Build ${escapeHtml(buildLabel)} · CardDAV: ${escapeHtml(settings.cardDavUser || "kein Benutzer")} · ${escapeHtml(settings.cardDavUrl || "keine URL")}</div>
         </div>
 
@@ -597,6 +609,7 @@ function bindEvents(): void {
       cardDavUser: String(form.get("cardDavUser") || defaultSettings.cardDavUser),
       sipServer: String(form.get("sipServer") || defaultSettings.sipServer),
       sipExtension: String(form.get("sipExtension") || defaultSettings.sipExtension),
+      sipAuthUser: String(form.get("sipAuthUser") || form.get("sipExtension") || defaultSettings.sipAuthUser),
       sipDisplayName: String(form.get("sipDisplayName") || defaultSettings.sipDisplayName),
       sipWebSocketUrl: String(form.get("sipWebSocketUrl") || defaultSettings.sipWebSocketUrl),
       allowedTestNumbers: String(form.get("allowedTestNumbers") || defaultSettings.allowedTestNumbers),

@@ -44,10 +44,15 @@ export async function hasSecretNative(service: string, account: string): Promise
   return tauriInvoke<boolean>("has_secret", { service, account });
 }
 
+export async function loadSecretNative(service: string, account: string): Promise<string | null> {
+  return tauriInvoke<string | null>("get_secret", { service, account });
+}
+
 export async function registerSipNative(settings: Settings, password?: string): Promise<NativeSipStatus> {
   return tauriInvoke<NativeSipStatus>("sip_register", {
     sipServer: settings.sipServer,
     sipExtension: settings.sipExtension,
+    sipAuthUser: settings.sipAuthUser || settings.sipExtension,
     displayName: settings.sipDisplayName,
     password: password || null
   });
