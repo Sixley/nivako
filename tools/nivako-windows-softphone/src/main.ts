@@ -12,8 +12,8 @@ import type { CallEntry, Contact, Settings, SoftphoneState } from "./types";
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.1.6";
-const buildLabel = "0.1.6 SIP-WebRTC-Telefonie";
+const appVersion = "0.1.7";
+const buildLabel = "0.1.7 SIP-Call-Diagnose";
 
 type View = "contacts" | "history" | "favorites" | "audio" | "settings";
 
@@ -69,6 +69,18 @@ let state: SoftphoneState = {
   activeNumber: "",
   callState: "idle"
 };
+
+function applyTelephonyStatus(status: string, registered?: boolean): void {
+  sipNotice = status;
+  state = { ...state, registered: registered ?? state.registered };
+  if (status.startsWith("Anruf klingelt")) state = { ...state, callState: "ringing" };
+  if (status.startsWith("Anruf aktiv") || status.startsWith("Anruf verbunden")) state = { ...state, callState: "active" };
+  if (status.startsWith("Anruf beendet") || status.startsWith("Anruf fehlgeschlagen")) {
+    state = { ...state, callState: "idle", muted: false };
+  }
+  notice = status;
+  render();
+}
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#039;" })[char] || char);
@@ -133,22 +145,12 @@ function configureTelephony(): void {
       authUser: settings.sipAuthUser || settings.sipExtension,
       password: sipPassword,
       displayName: settings.sipDisplayName
-    }, (status, registered) => {
-      sipNotice = status;
-      state = { ...state, registered: registered ?? state.registered };
-      notice = status;
-      render();
-    }, mediaConstraints);
+    }, applyTelephonyStatus, mediaConstraints);
     return;
   }
 
   if (canUseNativeTelephony()) {
-    telephony = new NativeTelephonyAdapter(() => settings, () => sipPassword, (status, registered) => {
-      sipNotice = status;
-      state = { ...state, registered: registered ?? state.registered };
-      notice = status;
-      render();
-    });
+    telephony = new NativeTelephonyAdapter(() => settings, () => sipPassword, applyTelephonyStatus);
     return;
   }
 

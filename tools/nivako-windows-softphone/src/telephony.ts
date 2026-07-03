@@ -47,6 +47,7 @@ export class SafeTelephonyAdapter implements TelephonyAdapter {
 export class WebRtcSipAdapter implements TelephonyAdapter {
   private ua?: any;
   private session?: any;
+  private remoteAudio?: HTMLAudioElement;
 
   constructor(
     private readonly config: SipRegistrationConfig,
@@ -72,7 +73,7 @@ export class WebRtcSipAdapter implements TelephonyAdapter {
 
     this.ua.on("registered", () => this.onStatus("SIP registriert", true));
     this.ua.on("unregistered", () => this.onStatus("SIP nicht registriert", false));
-    this.ua.on("registrationFailed", (event: any) => this.onStatus(`SIP Registrierung fehlgeschlagen: ${event?.cause || "unbekannt"}`, false));
+    this.ua.on("registrationFailed", (event: any) => this.onStatus(`SIP Registrierung fehlgeschlagen: ${sipEventSummary(event)}`, false));
     this.ua.on("newRTCSession", (event: any) => {
       this.session = event.session;
       this.bindSessionEvents(this.session);
@@ -84,7 +85,7 @@ export class WebRtcSipAdapter implements TelephonyAdapter {
 
   async dial(number: string): Promise<void> {
     if (!this.ua) throw new Error("SIP ist nicht registriert");
-    const target = `sip:${number}@${this.config.sipServer}`;
+    const target = `sip:${normalizeDialNumber(number)}@${this.config.sipServer}`;
     this.session = this.ua.call(target, {
       mediaConstraints: this.getMediaConstraints(),
       rtcOfferConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false }
@@ -113,9 +114,55 @@ export class WebRtcSipAdapter implements TelephonyAdapter {
   }
 
   private bindSessionEvents(session: any): void {
+    this.attachRemoteAudio(session);
     session.on("progress", () => this.onStatus("Anruf klingelt", true));
     session.on("accepted", () => this.onStatus("Anruf aktiv", true));
-    session.on("ended", () => this.onStatus("Anruf beendet", true));
-    session.on("failed", (event: any) => this.onStatus(`Anruf fehlgeschlagen: ${event?.cause || "unbekannt"}`, true));
+    session.on("confirmed", () => this.onStatus("Anruf verbunden", true));
+    session.on("ended", (event: any) => this.onStatus(`Anruf beendet: ${sipEventSummary(event)}`, true));
+    session.on("failed", (event: any) => this.onStatus(`Anruf fehlgeschlagen: ${sipEventSummary(event)}`, true));
   }
+
+  private attachRemoteAudio(session: any): void {
+    const connection = session?.connection;
+    if (!connection?.addEventListener) return;
+    const audio = this.ensureRemoteAudioElement();
+    connection.addEventListener("track", (event: RTCTrackEvent) => {
+      const stream = event.streams?.[0] || new MediaStream([event.track]);
+      audio.srcObject = stream;
+      void audio.play().catch(() => this.onStatus("Anruf-Audio wartet auf Windows/WebView-Freigabe", true));
+    });
+  }
+
+  private ensureRemoteAudioElement(): HTMLAudioElement {
+    if (this.remoteAudio) return this.remoteAudio;
+    const existing = document.querySelector<HTMLAudioElement>("#nivako-remote-audio");
+    if (existing) {
+      this.remoteAudio = existing;
+      return existing;
+    }
+    const audio = document.createElement("audio");
+    audio.id = "nivako-remote-audio";
+    audio.autoplay = true;
+    audio.setAttribute("playsinline", "true");
+    audio.style.display = "none";
+    document.body.append(audio);
+    this.remoteAudio = audio;
+    return audio;
+  }
+}
+
+function normalizeDialNumber(number: string): string {
+  return number.trim().replace(/[\s().-]/g, "");
+}
+
+function sipEventSummary(event: any): string {
+  const cause = event?.cause || "unbekannt";
+  const message = event?.message || event?.response;
+  const code = message?.status_code || message?.statusCode;
+  const reason = message?.reason_phrase || message?.reasonPhrase;
+  const originator = event?.originator;
+  const parts = [cause];
+  if (code) parts.push(`${code}${reason ? ` ${reason}` : ""}`);
+  if (originator) parts.push(`Originator ${originator}`);
+  return parts.join(" · ");
 }
