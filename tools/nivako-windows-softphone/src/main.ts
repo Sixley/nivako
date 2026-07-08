@@ -12,8 +12,8 @@ import type { CallEntry, Contact, NativeSipSnapshot, Settings, SoftphoneState } 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.2.1";
-const buildLabel = "0.2.1 Native-Call-State";
+const appVersion = "0.2.2";
+const buildLabel = "0.2.2 Stabilitaetsfix";
 const cardDavRefreshMs = 15 * 60 * 1000;
 const sipReconnectMs = 60 * 1000;
 const sipStatusPollMs = 2000;
@@ -89,6 +89,17 @@ let state: SoftphoneState = {
   callState: "idle"
 };
 
+function isEditingElement(element: Element | null): boolean {
+  return element instanceof HTMLInputElement
+    || element instanceof HTMLTextAreaElement
+    || element instanceof HTMLSelectElement;
+}
+
+function renderUnlessEditing(): void {
+  if (isEditingElement(document.activeElement)) return;
+  render();
+}
+
 function applyTelephonyStatus(status: string, registered?: boolean): void {
   sipNotice = status;
   state = { ...state, registered: registered ?? state.registered };
@@ -98,7 +109,7 @@ function applyTelephonyStatus(status: string, registered?: boolean): void {
     state = { ...state, callState: "idle", muted: false };
   }
   notice = status;
-  render();
+  renderUnlessEditing();
 }
 
 function normalizeCallState(value: string): SoftphoneState["callState"] {
@@ -114,17 +125,26 @@ function normalizeCallState(value: string): SoftphoneState["callState"] {
 }
 
 function applyNativeSipSnapshot(snapshot: NativeSipSnapshot): void {
-  sipNotice = `${snapshot.provider}: ${snapshot.message}`;
-  state = {
+  const nextState = {
     ...state,
     registered: snapshot.registered,
     callState: normalizeCallState(snapshot.call_state),
     muted: snapshot.muted
   };
-  if (state.callState === "idle") {
-    state = { ...state, muted: false };
+  if (nextState.callState === "idle") {
+    nextState.muted = false;
   }
-  render();
+  const nextNotice = `${snapshot.provider}: ${snapshot.message}`;
+  const changed = sipNotice !== nextNotice
+    || state.registered !== nextState.registered
+    || state.callState !== nextState.callState
+    || Boolean(state.muted) !== Boolean(nextState.muted);
+
+  if (!changed) return;
+
+  sipNotice = nextNotice;
+  state = nextState;
+  renderUnlessEditing();
 }
 
 function escapeHtml(value: string): string {
@@ -428,18 +448,21 @@ async function importVCards(file: File): Promise<void> {
 function renderContact(contact: Contact): string {
   const primaryPhone = contact.phones[0];
   const initials = contact.displayName.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase();
+  const details = [contact.organization, contact.email].filter(Boolean).join(" · ") || contact.source || "Kontakt";
 
   return `
     <div class="contact-row">
-      <button class="contact-select" data-number="${escapeHtml(primaryPhone?.normalized || "")}" data-contact="${escapeHtml(contact.id)}">
-        <span class="avatar">${escapeHtml(initials || "?")}</span>
-        <span class="contact-main">
-          <strong>${escapeHtml(contact.displayName)}</strong>
-          <small>${escapeHtml(contact.organization || contact.email || contact.source || "Kontakt")}</small>
-        </span>
-        <span class="contact-number">${escapeHtml(primaryPhone?.raw || "Keine Nummer")}</span>
-      </button>
-      ${contact.phones.slice(1).map((phone) => `<button class="phone-chip" data-number="${escapeHtml(phone.normalized)}" data-contact="${escapeHtml(contact.id)}">${escapeHtml(phone.label)} ${escapeHtml(phone.raw)}</button>`).join("")}
+      <div class="contact-body">
+        <button class="contact-select" data-number="${escapeHtml(primaryPhone?.normalized || "")}" data-contact="${escapeHtml(contact.id)}">
+          <span class="avatar">${escapeHtml(initials || "?")}</span>
+          <span class="contact-main">
+            <strong>${escapeHtml(contact.displayName)}</strong>
+            <small>${escapeHtml(details)}</small>
+          </span>
+          <span class="contact-number">${escapeHtml(primaryPhone?.raw || "Keine Nummer")}</span>
+        </button>
+        ${contact.phones.length > 1 ? `<div class="phone-chips">${contact.phones.slice(1).map((phone) => `<button class="phone-chip" data-number="${escapeHtml(phone.normalized)}" data-contact="${escapeHtml(contact.id)}">${escapeHtml(phone.label)} ${escapeHtml(phone.raw)}</button>`).join("")}</div>` : ""}
+      </div>
       <button class="favorite-button ${contact.favorite ? "active" : ""}" title="Favorit umschalten" data-favorite="${escapeHtml(contact.id)}">${contact.favorite ? "★" : "☆"}</button>
     </div>
   `;
