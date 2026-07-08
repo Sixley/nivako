@@ -1,5 +1,5 @@
 import { parseCardDavMultistatus, parseVCard } from "./carddav";
-import type { Contact, NativeSipStatus, Settings } from "./types";
+import type { Contact, NativeSipSnapshot, NativeSipStatus, Settings } from "./types";
 
 type Invoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
@@ -56,6 +56,10 @@ export async function registerSipNative(settings: Settings, password?: string): 
     displayName: settings.sipDisplayName,
     password: password || null
   });
+}
+
+export async function getSipStatusNative(): Promise<NativeSipSnapshot> {
+  return tauriInvoke<NativeSipSnapshot>("sip_status");
 }
 
 export async function dialNative(number: string, settings: Settings): Promise<NativeSipStatus> {
