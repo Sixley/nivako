@@ -12,8 +12,8 @@ import type { CallEntry, Contact, NativeSipSnapshot, Settings, SoftphoneState } 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.2.2";
-const buildLabel = "0.2.2 Stabilitaetsfix";
+const appVersion = "0.2.3";
+const buildLabel = "0.2.3 NIVAKO UX Pass";
 const cardDavRefreshMs = 15 * 60 * 1000;
 const sipReconnectMs = 60 * 1000;
 const sipStatusPollMs = 2000;
@@ -88,6 +88,57 @@ let state: SoftphoneState = {
   activeNumber: "",
   callState: "idle"
 };
+
+type Tone = "ok" | "warn" | "error" | "neutral";
+
+function statusTone(): Tone {
+  if (syncState === "error") return "error";
+  if (state.registered) return "ok";
+  if (sipNotice.toLowerCase().includes("fehlgeschlagen") || sipNotice.toLowerCase().includes("unauthorized")) return "warn";
+  return "neutral";
+}
+
+function primaryStatusText(): string {
+  if (state.registered) return `Nebenstelle ${settings.sipExtension} ist registriert.`;
+  if (sipNotice.toLowerCase().includes("unauthorized")) {
+    return "SIP-Anmeldung abgelehnt. Bitte Benutzer, Auth-ID und Passwort pruefen.";
+  }
+  if (syncState === "error") return "CardDAV braucht Aufmerksamkeit.";
+  if (hasStoredSipPassword) return "SIP wird automatisch erneut verbunden.";
+  return "SIP-Zugangsdaten fehlen noch.";
+}
+
+function serviceLine(): string {
+  const cardDav = syncState === "ok"
+    ? `CardDAV aktuell${lastCardDavSync ? ` um ${lastCardDavSync}` : ""}`
+    : contacts.length
+      ? `${contacts.length} Kontakte lokal verfuegbar`
+      : "Noch keine Kontakte geladen";
+  const sip = state.registered
+    ? "Telefonie bereit"
+    : hasStoredSipPassword
+      ? "SIP wartet auf erfolgreiche Registrierung"
+      : "SIP noch nicht eingerichtet";
+  return `${cardDav} · ${sip}`;
+}
+
+function renderDiagnostics(): string {
+  const lines = [
+    `Letzte Meldung: ${notice}`,
+    `Telefonie: ${settings.enableWebRtcSip ? "WebRTC/WSS-Fallback" : canUseNativeTelephony() ? "Native SIP/liblinphone" : "Browser-Modus"}`,
+    `SIP-Status: ${sipNotice}`,
+    `CardDAV: ${settings.cardDavUser || "kein Benutzer"} · ${settings.cardDavUrl || "keine URL"}`,
+    `Autopilot: CardDAV alle 15 Minuten${lastCardDavSync ? `, zuletzt ${lastCardDavSync}` : ""} · SIP-Reconnect alle 60 Sekunden${lastSipRegister ? `, zuletzt ${lastSipRegister}` : ""}`,
+    `Build: ${buildLabel}`
+  ];
+
+  return `
+    <details class="diagnostics">
+      <summary>Diagnose anzeigen</summary>
+      <div>${lines.map((line) => `<p>${escapeHtml(line)}</p>`).join("")}</div>
+    </details>
+  `;
+}
 
 function isEditingElement(element: Element | null): boolean {
   return element instanceof HTMLInputElement
@@ -449,6 +500,7 @@ function renderContact(contact: Contact): string {
   const primaryPhone = contact.phones[0];
   const initials = contact.displayName.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase();
   const details = [contact.organization, contact.email].filter(Boolean).join(" · ") || contact.source || "Kontakt";
+  const extraCount = Math.max(0, contact.phones.length - 1);
 
   return `
     <div class="contact-row">
@@ -459,7 +511,10 @@ function renderContact(contact: Contact): string {
             <strong>${escapeHtml(contact.displayName)}</strong>
             <small>${escapeHtml(details)}</small>
           </span>
-          <span class="contact-number">${escapeHtml(primaryPhone?.raw || "Keine Nummer")}</span>
+          <span class="contact-number">
+            <span>${escapeHtml(primaryPhone?.raw || "Keine Nummer")}</span>
+            ${extraCount ? `<small>+${extraCount}</small>` : ""}
+          </span>
         </button>
         ${contact.phones.length > 1 ? `<div class="phone-chips">${contact.phones.slice(1).map((phone) => `<button class="phone-chip" data-number="${escapeHtml(phone.normalized)}" data-contact="${escapeHtml(contact.id)}">${escapeHtml(phone.label)} ${escapeHtml(phone.raw)}</button>`).join("")}</div>` : ""}
       </div>
@@ -612,6 +667,7 @@ function telephonyStatusText(): string {
 function render(): void {
   const visibleContacts = searchContacts(contacts, query);
   const keypad = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"];
+  const tone = statusTone();
 
   root.innerHTML = `
     <section class="shell">
@@ -640,7 +696,10 @@ function render(): void {
       ${renderMainPanel(visibleContacts)}
 
       <section class="phone-panel">
-        <div class="notice ${syncState === "error" ? "error" : ""}">${escapeHtml(notice)}</div>
+        <div class="notice ${tone}">
+          <strong>${escapeHtml(primaryStatusText())}</strong>
+          <span>${escapeHtml(serviceLine())}</span>
+        </div>
         <div class="call-card">
           <div class="status-line">
             <span class="status-dot ${state.registered ? "" : "offline"}"></span>
@@ -664,9 +723,7 @@ function render(): void {
             <button class="secondary" id="hold" ${state.callState === "idle" ? "disabled" : ""}>${state.callState === "held" ? "Weiter" : "Halten"}</button>
             <button class="secondary" id="mute" ${state.callState === "idle" ? "disabled" : ""}>${state.muted ? "Mikro an" : "Stumm"}</button>
           </div>
-          <div class="sip-note">${escapeHtml(settings.enableWebRtcSip ? "WebRTC/WSS-Fallback" : canUseNativeTelephony() ? "Native SIP/liblinphone" : "Browser-Modus")} · ${escapeHtml(sipNotice)} · Testnummern: ${escapeHtml(settings.allowedTestNumbers || "keine")}</div>
-          <div class="sip-note">Autopilot: CardDAV alle 15 Minuten${lastCardDavSync ? `, zuletzt ${escapeHtml(lastCardDavSync)}` : ""} · SIP-Reconnect alle 60 Sekunden${lastSipRegister ? `, zuletzt ${escapeHtml(lastSipRegister)}` : ""}</div>
-          <div class="sip-note">Build ${escapeHtml(buildLabel)} · CardDAV: ${escapeHtml(settings.cardDavUser || "kein Benutzer")} · ${escapeHtml(settings.cardDavUrl || "keine URL")}</div>
+          ${renderDiagnostics()}
         </div>
 
         <div class="history">
