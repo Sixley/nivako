@@ -12,8 +12,8 @@ import type { CallEntry, Contact, NativeSipSnapshot, Settings, SoftphoneState } 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.2.7";
-const buildLabel = "0.2.7 Portable Linphone Runtime";
+const appVersion = "0.2.8";
+const buildLabel = "0.2.8 Strict Native Call Status";
 const cardDavRefreshMs = 15 * 60 * 1000;
 const sipReconnectMs = 60 * 1000;
 const sipStatusPollMs = 2000;
@@ -167,6 +167,7 @@ function applyTelephonyStatus(status: string, registered?: boolean): void {
   state = { ...state, registered: registered ?? state.registered };
   if (status.startsWith("Anruf klingelt")) state = { ...state, callState: "ringing" };
   if (status.startsWith("Anruf aktiv") || status.startsWith("Anruf verbunden")) state = { ...state, callState: "active" };
+  if (status.startsWith("Nativer Anruf gestartet")) state = { ...state, callState: "dialing" };
   if (status.startsWith("Anruf beendet") || status.startsWith("Anruf fehlgeschlagen")) {
     state = { ...state, callState: "idle", muted: false };
   }
@@ -346,14 +347,16 @@ async function dial(): Promise<void> {
   try {
     await telephony.dial(state.activeNumber);
     addHistory("outbound", state.activeNumber, state.activeContact?.displayName || state.activeNumber, "started");
-    state = { ...state, callState: "active" };
-    notice = realSipTelephony
-      ? "SIP-Anruf gestartet."
-      : settings.enableWebRtcSip
+    if (canUseNativeTelephony() && !settings.enableWebRtcSip) {
+      notice = sipNotice || "Nativer SIP-Anruf gestartet.";
+    } else {
+      state = { ...state, callState: "active" };
+      notice = settings.enableWebRtcSip
       ? "SIP-Anruf gestartet."
       : settings.useTelLinks
         ? "Anruf wurde an den Windows-tel:-Handler uebergeben."
         : "Kein SIP-Core verbunden. Nummer wurde nur im lokalen Verlauf erfasst.";
+    }
   } catch (error) {
     addHistory("outbound", state.activeNumber, state.activeContact?.displayName || state.activeNumber, "failed");
     notice = errorMessage(error, "Anruf fehlgeschlagen");

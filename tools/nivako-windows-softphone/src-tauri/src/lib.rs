@@ -1574,6 +1574,17 @@ fn sip_dial(
             ));
         }
 
+        let (registered, state_label) = if !session.account.is_null() {
+            account_registration_state(session.account)
+        } else {
+            registration_state(session.proxy)
+        };
+        if !registered {
+            return Err(AppError::Message(format!(
+                "SIP ist nicht registriert; Anruf wird nicht gestartet. SIP-Status: {state_label}"
+            )));
+        }
+
         let domain = normalize_domain(&sip_server);
         let target = if number.starts_with("sip:") || number.starts_with("sips:") {
             number.clone()
@@ -1590,8 +1601,7 @@ fn sip_dial(
             linphone_address_unref(address);
             call
         };
-        tick_core_for(session.core, 10, 100);
-        let (_registered, state_label) = registration_state(session.proxy);
+        tick_core_for(session.core, 20, 100);
         if call.is_null() {
             return Err(AppError::Message(format!(
                 "Anruf konnte nicht gestartet werden. SIP-Status: {state_label}"
@@ -1604,6 +1614,12 @@ fn sip_dial(
                 session.sip_extension
             ),
         );
+        if !snapshot.registered || snapshot.call_state == "idle" {
+            return Err(AppError::Message(format!(
+                "Anruf wurde von liblinphone nicht aktiv gestartet. {}",
+                snapshot.message
+            )));
+        }
         set_sip_snapshot(snapshot.clone());
         Ok(NativeSipStatus {
             registered: snapshot.registered,
