@@ -249,7 +249,7 @@ h2 small {
 
 .contact-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto 42px;
+  grid-template-columns: minmax(0, 1fr) 42px;
   align-items: stretch;
   width: 100%;
   border: 1px solid #dbe4e6;
@@ -257,6 +257,11 @@ h2 small {
   background: white;
   color: #142529;
   overflow: hidden;
+}
+
+.contact-body {
+  display: grid;
+  min-width: 0;
 }
 
 .contact-select,
@@ -292,15 +297,21 @@ h2 small {
 }
 
 .phone-chip {
-  align-self: center;
-  margin-right: 8px;
   border: 1px solid #cfe0e3;
-  border-radius: 999px;
+  border-radius: 7px;
   background: #f1f8f8;
   color: #31555a;
   padding: 6px 9px;
   font-size: 12px;
   white-space: nowrap;
+}
+
+.phone-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 11px 11px 67px;
+  min-width: 0;
 }
 
 .favorite-button.active {
@@ -334,6 +345,10 @@ h2 small {
 .contact-number {
   color: #31555a;
   font-variant-numeric: tabular-nums;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .phone-panel {
@@ -423,13 +438,19 @@ h2 small {
 
 .call-actions {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr) minmax(0, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
 }
 
 .call-actions button {
   min-width: 0;
   white-space: normal;
+  font-size: 14px;
+  line-height: 1.15;
+}
+
+.call-actions .secondary {
+  padding: 11px 8px;
 }
 
 .compact-actions {
@@ -438,7 +459,7 @@ h2 small {
 
 .primary,
 .danger {
-  padding: 12px 14px;
+  padding: 11px 8px;
   border-radius: 7px;
   color: white;
   font-weight: 800;
