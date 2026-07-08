@@ -41,6 +41,10 @@ fn main() {
                 }
             }
         }
+    } else {
+        let runtime_dir = std::path::Path::new("linphone-runtime");
+        let _ = std::fs::create_dir_all(runtime_dir);
+        let _ = std::fs::write(runtime_dir.join(".cargo-check-placeholder.dll"), []);
     }
 
     tauri_build::build();

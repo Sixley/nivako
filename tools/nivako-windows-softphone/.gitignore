@@ -5,3 +5,4 @@ target/
 .env
 .env.local
 *.log
+src-tauri/linphone-runtime/*.dll

@@ -23,7 +23,7 @@ type View = "contacts" | "history" | "favorites" | "audio" | "settings";
 const defaultSettings: Settings = {
   cardDavUrl: "https://threesix.de/remote.php/dav/addressbooks/users/Nivako/nivako-crm/",
   cardDavUser: "Nivako",
-  sipServer: import.meta.env.VITE_SIP_DOMAIN || "pbx.nivako.de",
+  sipServer: import.meta.env.VITE_SIP_DOMAIN || "pbx.nivako.de;transport=tcp",
   sipExtension: import.meta.env.VITE_SIP_EXTENSION || "101",
   sipAuthUser: import.meta.env.VITE_SIP_AUTH_USER || "101",
   sipWebSocketUrl: "wss://pbx.nivako.de:8089/ws",
@@ -62,6 +62,17 @@ if (isTauriRuntime() && !localStorage.getItem("nivako-softphone.desktop-native-v
   };
   saveSettings(settings);
   localStorage.setItem("nivako-softphone.desktop-native-v1", "1");
+}
+if (isTauriRuntime() && !localStorage.getItem("nivako-softphone.desktop-native-tcp-v1")) {
+  settings = {
+    ...settings,
+    sipServer: settings.sipServer === "pbx.nivako.de" ? "pbx.nivako.de;transport=tcp" : settings.sipServer,
+    safeCallMode: false,
+    enableWebRtcSip: false,
+    sipAuthUser: settings.sipAuthUser || settings.sipExtension
+  };
+  saveSettings(settings);
+  localStorage.setItem("nivako-softphone.desktop-native-tcp-v1", "1");
 }
 let telephony: TelephonyAdapter = new SafeTelephonyAdapter(() => settings.useTelLinks && !settings.safeCallMode);
 let contacts = applyFavorites(loadContacts([]), loadFavoriteIds());

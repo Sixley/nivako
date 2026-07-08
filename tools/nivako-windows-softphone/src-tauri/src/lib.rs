@@ -1,12 +1,14 @@
 use base64::Engine;
 use once_cell::sync::Lazy;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CStr, CString};
 use std::fs;
+use std::io::{self, BufRead, BufReader, Write};
 use std::net::{ToSocketAddrs, UdpSocket};
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::PathBuf;
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,13 +18,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const CARDDAV_SERVICE: &str = "NIVAKO Softphone CardDAV";
 const SIP_SERVICE: &str = "NIVAKO Softphone SIP";
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct NativeSipStatus {
     registered: bool,
     message: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct NativeSipSnapshot {
     registered: bool,
     call_state: String,
@@ -49,6 +51,14 @@ type LinphoneProxyConfig = c_void;
 #[allow(non_camel_case_types)]
 type bool_t = c_int;
 
+#[repr(C)]
+struct LinphoneSipTransports {
+    udp_port: c_int,
+    tcp_port: c_int,
+    dtls_port: c_int,
+    tls_port: c_int,
+}
+
 #[cfg_attr(target_os = "windows", link(name = "liblinphone"))]
 #[cfg_attr(not(target_os = "windows"), link(name = "linphone"))]
 extern "C" {
@@ -61,6 +71,13 @@ extern "C" {
     fn linphone_core_start(core: *mut LinphoneCore) -> c_int;
     fn linphone_core_iterate(core: *mut LinphoneCore);
     fn linphone_core_unref(core: *mut LinphoneCore);
+    fn linphone_core_set_network_reachable(core: *mut LinphoneCore, reachable: bool_t);
+    fn linphone_core_set_sip_network_reachable(core: *mut LinphoneCore, reachable: bool_t);
+    fn linphone_core_set_media_network_reachable(core: *mut LinphoneCore, reachable: bool_t);
+    fn linphone_core_set_sip_transports(
+        core: *mut LinphoneCore,
+        transports: *const LinphoneSipTransports,
+    ) -> c_int;
     fn linphone_core_add_auth_info(core: *mut LinphoneCore, auth_info: *mut LinphoneAuthInfo);
     fn linphone_auth_info_new(
         username: *const c_char,
@@ -80,10 +97,16 @@ extern "C" {
         proxy_config: *mut LinphoneProxyConfig,
         server_address: *const c_char,
     ) -> c_int;
+    fn linphone_proxy_config_edit(proxy_config: *mut LinphoneProxyConfig);
     fn linphone_proxy_config_enable_register(
         proxy_config: *mut LinphoneProxyConfig,
         enable: bool_t,
     );
+    fn linphone_proxy_config_set_expires(
+        proxy_config: *mut LinphoneProxyConfig,
+        expires: c_int,
+    );
+    fn linphone_proxy_config_done(proxy_config: *mut LinphoneProxyConfig) -> c_int;
     fn linphone_core_add_proxy_config(
         core: *mut LinphoneCore,
         config: *mut LinphoneProxyConfig,
@@ -92,6 +115,9 @@ extern "C" {
         core: *mut LinphoneCore,
         config: *mut LinphoneProxyConfig,
     );
+    fn linphone_proxy_config_refresh_register(proxy_config: *mut LinphoneProxyConfig);
+    fn linphone_core_refresh_registers(core: *mut LinphoneCore);
+    fn linphone_core_ensure_registered(core: *mut LinphoneCore);
     fn linphone_proxy_config_get_state(proxy_config: *const LinphoneProxyConfig) -> c_int;
     fn linphone_registration_state_to_string(state: c_int) -> *const c_char;
     fn linphone_address_new(address: *const c_char) -> *mut LinphoneAddress;
@@ -143,6 +169,48 @@ static SIP_SNAPSHOT: Lazy<Arc<Mutex<NativeSipSnapshot>>> = Lazy::new(|| {
     }))
 });
 static SIP_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
+static SIP_SIDECAR: Lazy<Arc<Mutex<Option<SipSidecarClient>>>> =
+    Lazy::new(|| Arc::new(Mutex::new(None)));
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "command", rename_all = "snake_case")]
+enum SipSidecarCommand {
+    Register {
+        sip_server: String,
+        sip_extension: String,
+        sip_auth_user: String,
+        display_name: String,
+        password: String,
+    },
+    Status,
+    Dial {
+        number: String,
+        sip_server: String,
+        sip_extension: String,
+    },
+    Hangup,
+    Hold,
+    Mute {
+        muted: bool,
+    },
+    Dtmf {
+        digit: String,
+    },
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum SipSidecarReply {
+    Status { status: NativeSipStatus },
+    Snapshot { snapshot: NativeSipSnapshot },
+    Error { message: String },
+}
+
+struct SipSidecarClient {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
 
 #[derive(Debug, thiserror::Error)]
 enum AppError {
@@ -173,6 +241,10 @@ fn c_string_or_empty(ptr: *const c_char) -> String {
         return String::new();
     }
     unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
+}
+
+fn is_sip_sidecar_process() -> bool {
+    std::env::args().any(|arg| arg == "--nivako-sip-sidecar")
 }
 
 fn normalize_sip_server(sip_server: &str) -> String {
@@ -653,6 +725,48 @@ fn fallback_secret_path() -> Result<PathBuf, AppError> {
     Ok(base.join("NIVAKO Softphone").join("secrets-fallback.json"))
 }
 
+fn app_data_dir() -> Result<PathBuf, AppError> {
+    let base = std::env::var_os("APPDATA")
+        .or_else(|| std::env::var_os("LOCALAPPDATA"))
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("XDG_DATA_HOME").map(PathBuf::from))
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join(".local").join("share"))
+        })
+        .or_else(|| std::env::current_dir().ok())
+        .ok_or_else(|| {
+            AppError::Message("App-Datenordner konnte nicht ermittelt werden".to_string())
+        })?;
+    Ok(base.join("NIVAKO Softphone"))
+}
+
+fn linphone_config_path() -> Result<CString, AppError> {
+    let dir = app_data_dir()?.join("linphone");
+    fs::create_dir_all(&dir).map_err(|error| {
+        AppError::Message(format!(
+            "liblinphone-Datenordner konnte nicht erstellt werden: {error}"
+        ))
+    })?;
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let _ = fs::create_dir_all(home.join(".local").join("share").join("linphone"));
+    }
+    if let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) {
+        let _ = fs::create_dir_all(appdata.join("linphone"));
+    }
+    if let Some(localappdata) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+        let _ = fs::create_dir_all(localappdata.join("linphone"));
+    }
+    let config = dir.join(format!("linphone-sidecar-{}.rc", std::process::id()));
+    let _ = fs::write(
+        &config,
+        "[sip]\nregister_only_when_network_is_up=0\nregister_only_when_upnp_is_ok=0\nguess_hostname=1\n\n[net]\nfirewall_policy=0\n",
+    );
+    let config = config.to_string_lossy().into_owned();
+    cstring(&config, "liblinphone-Konfigurationspfad")
+}
+
 fn fallback_secret_key(service: &str, account: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(format!("{service}\n{account}"))
 }
@@ -840,10 +954,30 @@ fn sip_register_linphone(
     let c_domain = cstring(&domain, "SIP-Domain")?;
     let c_identity = cstring(&identity, "SIP-Identitaet")?;
     let c_server = cstring(&server_addr, "SIP-Server")?;
+    let config_path = linphone_config_path()?;
 
-    let core = unsafe { linphone_core_new(ptr::null(), ptr::null(), ptr::null(), ptr::null_mut()) };
+    let core = unsafe {
+        linphone_core_new(
+            ptr::null(),
+            config_path.as_ptr(),
+            ptr::null(),
+            ptr::null_mut(),
+        )
+    };
     if core.is_null() {
         return Err(AppError::Message("liblinphone Core konnte nicht erstellt werden".to_string()));
+    }
+    unsafe {
+        let transports = LinphoneSipTransports {
+            udp_port: -1,
+            tcp_port: -1,
+            dtls_port: 0,
+            tls_port: 0,
+        };
+        linphone_core_set_sip_transports(core, &transports);
+        linphone_core_set_network_reachable(core, 1);
+        linphone_core_set_sip_network_reachable(core, 1);
+        linphone_core_set_media_network_reachable(core, 1);
     }
 
     let result: Result<*mut LinphoneProxyConfig, AppError> = unsafe {
@@ -874,17 +1008,28 @@ fn sip_register_linphone(
             return Err(AppError::Message(format!("Ungueltige SIP-Identitaet: {identity}")));
         }
 
+        linphone_proxy_config_edit(proxy);
         let identity_status = linphone_proxy_config_set_identity_address(proxy, address);
         linphone_address_unref(address);
         let server_status = linphone_proxy_config_set_server_addr(proxy, c_server.as_ptr());
+        linphone_proxy_config_set_expires(proxy, 600);
         linphone_proxy_config_enable_register(proxy, 1);
+        let done_status = linphone_proxy_config_done(proxy);
         let add_status = linphone_core_add_proxy_config(core, proxy);
         linphone_core_set_default_proxy_config(core, proxy);
         let start_status = linphone_core_start(core);
+        linphone_core_set_network_reachable(core, 1);
+        linphone_core_set_sip_network_reachable(core, 1);
+        linphone_core_set_media_network_reachable(core, 1);
+        linphone_proxy_config_refresh_register(proxy);
+        linphone_core_refresh_registers(core);
+        linphone_core_ensure_registered(core);
 
-        if identity_status != 0 || server_status != 0 || add_status != 0 || start_status != 0 {
+        if identity_status != 0 || server_status != 0 || done_status != 0 || add_status != 0 {
             linphone_core_unref(core);
-            return Err(AppError::Message("SIP-Konfiguration wurde von liblinphone abgelehnt".to_string()));
+            return Err(AppError::Message(format!(
+                "SIP-Konfiguration wurde von liblinphone abgelehnt (identity={identity_status}, server={server_status}, done={done_status}, add={add_status}, start={start_status})"
+            )));
         }
 
         Ok(proxy)
@@ -917,6 +1062,167 @@ fn sip_register_linphone(
         registered: snapshot.registered,
         message: snapshot.message,
     })
+}
+
+fn start_sip_sidecar() -> Result<SipSidecarClient, AppError> {
+    let executable = std::env::current_exe().map_err(|error| {
+        AppError::Message(format!("SIP-Sidecar konnte App-Pfad nicht ermitteln: {error}"))
+    })?;
+    let mut child = Command::new(executable)
+        .arg("--nivako-sip-sidecar")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| AppError::Message(format!("SIP-Sidecar konnte nicht starten: {error}")))?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| AppError::Message("SIP-Sidecar stdin fehlt".to_string()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| AppError::Message("SIP-Sidecar stdout fehlt".to_string()))?;
+    Ok(SipSidecarClient {
+        child,
+        stdin,
+        stdout: BufReader::new(stdout),
+    })
+}
+
+fn sip_sidecar_call(command: SipSidecarCommand) -> Result<SipSidecarReply, AppError> {
+    let mut guard = SIP_SIDECAR
+        .lock()
+        .map_err(|_| AppError::Message("SIP-Sidecar ist blockiert".to_string()))?;
+
+    let needs_new_child = match guard.as_mut() {
+        Some(client) => client
+            .child
+            .try_wait()
+            .map(|status| status.is_some())
+            .unwrap_or(true),
+        None => true,
+    };
+    if needs_new_child {
+        *guard = Some(start_sip_sidecar()?);
+    }
+
+    let client = guard
+        .as_mut()
+        .ok_or_else(|| AppError::Message("SIP-Sidecar ist nicht aktiv".to_string()))?;
+    let request = serde_json::to_string(&command).map_err(|error| {
+        AppError::Message(format!("SIP-Sidecar Kommando konnte nicht serialisiert werden: {error}"))
+    })?;
+    if let Err(error) = writeln!(client.stdin, "{request}").and_then(|_| client.stdin.flush()) {
+        *guard = None;
+        return Err(AppError::Message(format!(
+            "SIP-Sidecar Kommando fehlgeschlagen: {error}"
+        )));
+    }
+
+    let mut response = String::new();
+    match client.stdout.read_line(&mut response) {
+        Ok(0) => {
+            *guard = None;
+            Err(AppError::Message(
+                "SIP-Sidecar wurde ohne Antwort beendet".to_string(),
+            ))
+        }
+        Ok(_) => serde_json::from_str::<SipSidecarReply>(&response).map_err(|error| {
+            AppError::Message(format!("SIP-Sidecar Antwort ist unlesbar: {error}"))
+        }),
+        Err(error) => {
+            *guard = None;
+            Err(AppError::Message(format!(
+                "SIP-Sidecar Antwort fehlgeschlagen: {error}"
+            )))
+        }
+    }
+}
+
+fn sidecar_reply(command: SipSidecarCommand) -> SipSidecarReply {
+    match command {
+        SipSidecarCommand::Register {
+            sip_server,
+            sip_extension,
+            sip_auth_user,
+            display_name,
+            password,
+        } => match sip_register_linphone(
+            &sip_server,
+            &sip_extension,
+            &sip_auth_user,
+            &display_name,
+            &password,
+        ) {
+            Ok(status) => SipSidecarReply::Status { status },
+            Err(error) => SipSidecarReply::Error {
+                message: error.to_string(),
+            },
+        },
+        SipSidecarCommand::Status => match sip_status() {
+            Ok(snapshot) => SipSidecarReply::Snapshot { snapshot },
+            Err(error) => SipSidecarReply::Error {
+                message: error.to_string(),
+            },
+        },
+        SipSidecarCommand::Dial {
+            number,
+            sip_server,
+            sip_extension,
+        } => match sip_dial(number, sip_server, sip_extension) {
+            Ok(status) => SipSidecarReply::Status { status },
+            Err(error) => SipSidecarReply::Error {
+                message: error.to_string(),
+            },
+        },
+        SipSidecarCommand::Hangup => match sip_hangup() {
+            Ok(status) => SipSidecarReply::Status { status },
+            Err(error) => SipSidecarReply::Error {
+                message: error.to_string(),
+            },
+        },
+        SipSidecarCommand::Hold => match sip_hold() {
+            Ok(status) => SipSidecarReply::Status { status },
+            Err(error) => SipSidecarReply::Error {
+                message: error.to_string(),
+            },
+        },
+        SipSidecarCommand::Mute { muted } => match sip_mute(muted) {
+            Ok(status) => SipSidecarReply::Status { status },
+            Err(error) => SipSidecarReply::Error {
+                message: error.to_string(),
+            },
+        },
+        SipSidecarCommand::Dtmf { digit } => match sip_dtmf(digit) {
+            Ok(status) => SipSidecarReply::Status { status },
+            Err(error) => SipSidecarReply::Error {
+                message: error.to_string(),
+            },
+        },
+    }
+}
+
+pub fn run_sip_sidecar() {
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+    for line in stdin.lock().lines() {
+        let reply = match line {
+            Ok(line) => match serde_json::from_str::<SipSidecarCommand>(&line) {
+                Ok(command) => sidecar_reply(command),
+                Err(error) => SipSidecarReply::Error {
+                    message: format!("SIP-Sidecar Kommando ist unlesbar: {error}"),
+                },
+            },
+            Err(error) => SipSidecarReply::Error {
+                message: format!("SIP-Sidecar Eingabe fehlgeschlagen: {error}"),
+            },
+        };
+        if let Ok(serialized) = serde_json::to_string(&reply) {
+            let _ = writeln!(stdout, "{serialized}");
+            let _ = stdout.flush();
+        }
+    }
 }
 
 #[tauri::command]
@@ -1006,7 +1312,87 @@ fn sip_register(
     password: Option<String>,
 ) -> Result<NativeSipStatus, AppError> {
     let password = stored_or_supplied_secret(SIP_SERVICE, &sip_extension, password)?;
-    if std::env::var("NIVAKO_ENABLE_LIBLINPHONE").ok().as_deref() == Some("1") {
+    if !is_sip_sidecar_process() {
+        return match sip_sidecar_call(SipSidecarCommand::Register {
+            sip_server: sip_server.clone(),
+            sip_extension: sip_extension.clone(),
+            sip_auth_user: sip_auth_user.clone(),
+            display_name: display_name.clone(),
+            password: password.clone(),
+        }) {
+            Ok(SipSidecarReply::Status { status }) => {
+                set_sip_snapshot(NativeSipSnapshot {
+                    registered: status.registered,
+                    call_state: "idle".to_string(),
+                    provider: "liblinphone-sidecar".to_string(),
+                    message: status.message.clone(),
+                    held: false,
+                    muted: false,
+                });
+                Ok(status)
+            }
+            Ok(SipSidecarReply::Error { message }) => {
+                let diagnostic = sip_register_udp(
+                    &sip_server,
+                    &sip_extension,
+                    &sip_auth_user,
+                    &display_name,
+                    &password,
+                )
+                .map(|status| status.message)
+                .unwrap_or_else(|error| format!("UDP-Diagnose ebenfalls fehlgeschlagen: {error}"));
+                let message = format!(
+                    "Nativer SIP-Core konnte nicht starten oder registrieren: {message}. {diagnostic}"
+                );
+                set_sip_snapshot(NativeSipSnapshot {
+                    registered: false,
+                    call_state: "idle".to_string(),
+                    provider: "liblinphone-sidecar".to_string(),
+                    message: message.clone(),
+                    held: false,
+                    muted: false,
+                });
+                Ok(NativeSipStatus {
+                    registered: false,
+                    message,
+                })
+            }
+            Ok(SipSidecarReply::Snapshot { snapshot }) => Ok(NativeSipStatus {
+                registered: snapshot.registered,
+                message: snapshot.message,
+            }),
+            Err(error) => {
+                let diagnostic = sip_register_udp(
+                    &sip_server,
+                    &sip_extension,
+                    &sip_auth_user,
+                    &display_name,
+                    &password,
+                )
+                .map(|status| status.message)
+                .unwrap_or_else(|udp_error| {
+                    format!("UDP-Diagnose ebenfalls fehlgeschlagen: {udp_error}")
+                });
+                let message = format!("SIP-Sidecar Fehler: {error}. {diagnostic}");
+                set_sip_snapshot(NativeSipSnapshot {
+                    registered: false,
+                    call_state: "idle".to_string(),
+                    provider: "liblinphone-sidecar".to_string(),
+                    message: message.clone(),
+                    held: false,
+                    muted: false,
+                });
+                Ok(NativeSipStatus {
+                    registered: false,
+                    message,
+                })
+            }
+        };
+    }
+
+    if is_sip_sidecar_process()
+        || std::env::var("NIVAKO_ENABLE_LIBLINPHONE").ok().as_deref() == Some("1")
+    {
         return match sip_register_linphone(
             &sip_server,
             &sip_extension,
@@ -1070,6 +1456,14 @@ fn sip_register(
 
 #[tauri::command]
 fn sip_status() -> Result<NativeSipSnapshot, AppError> {
+    if !is_sip_sidecar_process() {
+        if let Ok(SipSidecarReply::Snapshot { snapshot }) =
+            sip_sidecar_call(SipSidecarCommand::Status)
+        {
+            set_sip_snapshot(snapshot.clone());
+            return Ok(snapshot);
+        }
+    }
     if let Some(snapshot) = refresh_sip_snapshot_from_session("Native SIP aktiv.".to_string()) {
         return Ok(snapshot);
     }
@@ -1085,6 +1479,21 @@ fn sip_dial(
     sip_server: String,
     sip_extension: String,
 ) -> Result<NativeSipStatus, AppError> {
+    if !is_sip_sidecar_process() {
+        return match sip_sidecar_call(SipSidecarCommand::Dial {
+            number,
+            sip_server,
+            sip_extension,
+        })? {
+            SipSidecarReply::Status { status } => Ok(status),
+            SipSidecarReply::Error { message } => Err(AppError::Message(message)),
+            SipSidecarReply::Snapshot { snapshot } => Ok(NativeSipStatus {
+                registered: snapshot.registered,
+                message: snapshot.message,
+            }),
+        };
+    }
+
     with_session(|session| {
         if session.sip_server != sip_server || session.sip_extension != sip_extension {
             return Err(AppError::Message(
@@ -1129,6 +1538,17 @@ fn sip_dial(
 
 #[tauri::command]
 fn sip_hangup() -> Result<NativeSipStatus, AppError> {
+    if !is_sip_sidecar_process() {
+        return match sip_sidecar_call(SipSidecarCommand::Hangup)? {
+            SipSidecarReply::Status { status } => Ok(status),
+            SipSidecarReply::Error { message } => Err(AppError::Message(message)),
+            SipSidecarReply::Snapshot { snapshot } => Ok(NativeSipStatus {
+                registered: snapshot.registered,
+                message: snapshot.message,
+            }),
+        };
+    }
+
     with_session(|session| {
         unsafe { linphone_core_terminate_all_calls(session.core) };
         tick_core_for(session.core, 5, 80);
@@ -1144,6 +1564,17 @@ fn sip_hangup() -> Result<NativeSipStatus, AppError> {
 
 #[tauri::command]
 fn sip_hold() -> Result<NativeSipStatus, AppError> {
+    if !is_sip_sidecar_process() {
+        return match sip_sidecar_call(SipSidecarCommand::Hold)? {
+            SipSidecarReply::Status { status } => Ok(status),
+            SipSidecarReply::Error { message } => Err(AppError::Message(message)),
+            SipSidecarReply::Snapshot { snapshot } => Ok(NativeSipStatus {
+                registered: snapshot.registered,
+                message: snapshot.message,
+            }),
+        };
+    }
+
     with_session(|session| {
         let call = unsafe { linphone_core_get_current_call(session.core) };
         if call.is_null() {
@@ -1181,6 +1612,17 @@ fn sip_hold() -> Result<NativeSipStatus, AppError> {
 
 #[tauri::command]
 fn sip_mute(muted: bool) -> Result<NativeSipStatus, AppError> {
+    if !is_sip_sidecar_process() {
+        return match sip_sidecar_call(SipSidecarCommand::Mute { muted })? {
+            SipSidecarReply::Status { status } => Ok(status),
+            SipSidecarReply::Error { message } => Err(AppError::Message(message)),
+            SipSidecarReply::Snapshot { snapshot } => Ok(NativeSipStatus {
+                registered: snapshot.registered,
+                message: snapshot.message,
+            }),
+        };
+    }
+
     with_session(|session| {
         unsafe { linphone_core_enable_mic(session.core, if muted { 0 } else { 1 }) };
         session.muted = muted;
@@ -1203,6 +1645,17 @@ fn sip_mute(muted: bool) -> Result<NativeSipStatus, AppError> {
 
 #[tauri::command]
 fn sip_dtmf(digit: String) -> Result<NativeSipStatus, AppError> {
+    if !is_sip_sidecar_process() {
+        return match sip_sidecar_call(SipSidecarCommand::Dtmf { digit })? {
+            SipSidecarReply::Status { status } => Ok(status),
+            SipSidecarReply::Error { message } => Err(AppError::Message(message)),
+            SipSidecarReply::Snapshot { snapshot } => Ok(NativeSipStatus {
+                registered: snapshot.registered,
+                message: snapshot.message,
+            }),
+        };
+    }
+
     with_session(|session| {
         let call = unsafe { linphone_core_get_current_call(session.core) };
         if call.is_null() {
