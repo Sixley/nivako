@@ -31,8 +31,7 @@
     "publisher": "NIVAKO",
     "category": "Business",
     "resources": {
-      "linphone-runtime/*.dll": "",
-      "linphone-runtime/share/**/*": "share/"
+      "linphone-runtime/*.dll": ""
     }
   }
 }

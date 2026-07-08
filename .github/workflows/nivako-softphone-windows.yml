@@ -137,11 +137,6 @@ jobs:
             $manifests | Select-Object FullName
             throw "liblinphone.dll is missing from the generated installer manifests"
           }
-          $grammarManifestHit = $manifests | Where-Object { Select-String -Path $_.FullName -Pattern "vcard_grammar.belr" -Quiet } | Select-Object -First 1
-          if (-not $grammarManifestHit) {
-            $manifests | Select-Object FullName
-            throw "BELR grammar resources are missing from the generated installer manifests"
-          }
           Write-Host "Installer manifest includes liblinphone.dll via $($manifestHit.FullName)"
 
       - name: Create portable artifact
