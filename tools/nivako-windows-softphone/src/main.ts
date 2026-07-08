@@ -2,20 +2,21 @@ import "./styles.css";
 import { loadAudioDevices, type AudioDeviceState } from "./audioDevices";
 import { parseManyVCards } from "./carddav";
 import { syncCardDavContacts } from "./contactsRepository";
-import { getLastCardDavDiagnostic, hasSecretNative, isTauriRuntime, loadSecretNative, saveSecretNative } from "./nativeBridge";
+import { getLastCardDavDiagnostic, getSipStatusNative, hasSecretNative, isTauriRuntime, loadSecretNative, saveSecretNative } from "./nativeBridge";
 import { canUseNativeTelephony, NativeTelephonyAdapter } from "./nativeTelephony";
 import { searchContacts } from "./search";
 import { loadContacts, loadFavoriteIds, loadHistory, loadSettings, saveContacts, saveFavoriteIds, saveHistory, saveSettings } from "./storage";
 import { SafeTelephonyAdapter, WebRtcSipAdapter, type TelephonyAdapter } from "./telephony";
-import type { CallEntry, Contact, Settings, SoftphoneState } from "./types";
+import type { CallEntry, Contact, NativeSipSnapshot, Settings, SoftphoneState } from "./types";
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.2.0";
-const buildLabel = "0.2.0 Desktop-Autopilot";
+const appVersion = "0.2.1";
+const buildLabel = "0.2.1 Native-Call-State";
 const cardDavRefreshMs = 15 * 60 * 1000;
 const sipReconnectMs = 60 * 1000;
+const sipStatusPollMs = 2000;
 
 type View = "contacts" | "history" | "favorites" | "audio" | "settings";
 
@@ -76,6 +77,7 @@ let lastCardDavSync = "";
 let lastSipRegister = "";
 let cardDavTimer: number | undefined;
 let sipReconnectTimer: number | undefined;
+let sipStatusTimer: number | undefined;
 let notice = isTauriRuntime()
   ? `Desktop-Modus bereit. Build ${buildLabel}.`
   : "Bereit. CardDAV kann synchronisiert werden; echte Anrufe bleiben blockiert, solange der Anrufschutz aktiv ist.";
@@ -96,6 +98,32 @@ function applyTelephonyStatus(status: string, registered?: boolean): void {
     state = { ...state, callState: "idle", muted: false };
   }
   notice = status;
+  render();
+}
+
+function normalizeCallState(value: string): SoftphoneState["callState"] {
+  const lower = value.toLowerCase();
+  if (["idle", "ringing", "dialing", "active", "held"].includes(lower)) {
+    return lower as SoftphoneState["callState"];
+  }
+  if (lower.includes("outgoing")) return "dialing";
+  if (lower.includes("incoming") || lower.includes("ringing")) return "ringing";
+  if (lower.includes("stream") || lower.includes("connect")) return "active";
+  if (lower.includes("paused") || lower.includes("hold")) return "held";
+  return "idle";
+}
+
+function applyNativeSipSnapshot(snapshot: NativeSipSnapshot): void {
+  sipNotice = `${snapshot.provider}: ${snapshot.message}`;
+  state = {
+    ...state,
+    registered: snapshot.registered,
+    callState: normalizeCallState(snapshot.call_state),
+    muted: snapshot.muted
+  };
+  if (state.callState === "idle") {
+    state = { ...state, muted: false };
+  }
   render();
 }
 
@@ -352,6 +380,7 @@ function scheduleDesktopMaintenance(): void {
   if (!isTauriRuntime()) return;
   if (cardDavTimer) window.clearInterval(cardDavTimer);
   if (sipReconnectTimer) window.clearInterval(sipReconnectTimer);
+  if (sipStatusTimer) window.clearInterval(sipStatusTimer);
 
   cardDavTimer = window.setInterval(() => {
     if (hasStoredCardDavPassword && syncState !== "syncing") {
@@ -364,6 +393,12 @@ function scheduleDesktopMaintenance(): void {
       void registerSip();
     }
   }, sipReconnectMs);
+
+  sipStatusTimer = window.setInterval(() => {
+    void getSipStatusNative()
+      .then(applyNativeSipSnapshot)
+      .catch(() => undefined);
+  }, sipStatusPollMs);
 }
 
 async function saveEnteredSecrets(): Promise<void> {
