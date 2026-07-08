@@ -12,8 +12,10 @@ import type { CallEntry, Contact, Settings, SoftphoneState } from "./types";
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.1.9";
-const buildLabel = "0.1.9 Native-SIP-Desktop";
+const appVersion = "0.2.0";
+const buildLabel = "0.2.0 Desktop-Autopilot";
+const cardDavRefreshMs = 15 * 60 * 1000;
+const sipReconnectMs = 60 * 1000;
 
 type View = "contacts" | "history" | "favorites" | "audio" | "settings";
 
@@ -70,6 +72,10 @@ let hasStoredCardDavPassword = false;
 let hasStoredSipPassword = false;
 let query = "";
 let activeView: View = "contacts";
+let lastCardDavSync = "";
+let lastSipRegister = "";
+let cardDavTimer: number | undefined;
+let sipReconnectTimer: number | undefined;
 let notice = isTauriRuntime()
   ? `Desktop-Modus bereit. Build ${buildLabel}.`
   : "Bereit. CardDAV kann synchronisiert werden; echte Anrufe bleiben blockiert, solange der Anrufschutz aktiv ist.";
@@ -109,6 +115,10 @@ function errorMessage(error: unknown, fallback: string): string {
     }
   }
   return fallback;
+}
+
+function nowLabel(): string {
+  return new Intl.DateTimeFormat("de-DE", { hour: "2-digit", minute: "2-digit" }).format(new Date());
 }
 
 function applyFavorites(nextContacts: Contact[], favoriteIds: string[]): Contact[] {
@@ -175,6 +185,7 @@ async function registerSip(): Promise<void> {
     }
     configureTelephony();
     await telephony.register();
+    lastSipRegister = nowLabel();
   } catch (error) {
     state = { ...state, registered: false };
     sipNotice = errorMessage(error, "SIP Registrierung fehlgeschlagen");
@@ -295,6 +306,7 @@ async function syncCardDav(): Promise<void> {
     contacts = applyFavorites(contactsWithPhones, favoriteIds);
     persistContacts();
     syncState = "ok";
+    lastCardDavSync = nowLabel();
     const nativeDiagnostic = isTauriRuntime() ? ` ${getLastCardDavDiagnostic()}` : "";
     notice = `CardDAV OK: ${synced.length} Kontakte gelesen, ${contactsWithPhones.length} mit Telefonnummer.${nativeDiagnostic}`;
   } catch (error) {
@@ -334,6 +346,24 @@ async function startDesktopServices(): Promise<void> {
     notice = "Desktop-Modus bereit. Hinterlegte CardDAV-/SIP-Zugangsdaten fehlen noch.";
     render();
   }
+}
+
+function scheduleDesktopMaintenance(): void {
+  if (!isTauriRuntime()) return;
+  if (cardDavTimer) window.clearInterval(cardDavTimer);
+  if (sipReconnectTimer) window.clearInterval(sipReconnectTimer);
+
+  cardDavTimer = window.setInterval(() => {
+    if (hasStoredCardDavPassword && syncState !== "syncing") {
+      void syncCardDav();
+    }
+  }, cardDavRefreshMs);
+
+  sipReconnectTimer = window.setInterval(() => {
+    if (hasStoredSipPassword && !state.registered && state.callState === "idle") {
+      void registerSip();
+    }
+  }, sipReconnectMs);
 }
 
 async function saveEnteredSecrets(): Promise<void> {
@@ -503,6 +533,15 @@ function navButton(view: View, label: string): string {
   return `<button data-view="${view}" class="${activeView === view ? "active" : ""}">${label}</button>`;
 }
 
+function healthPill(label: string, value: string, stateClass = ""): string {
+  return `
+    <div class="health-pill ${stateClass}">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+    </div>
+  `;
+}
+
 function telephonyStatusText(): string {
   if (state.registered) return "SIP registriert";
   if (settings.safeCallMode) return "Anrufschutz aktiv";
@@ -533,6 +572,11 @@ function render(): void {
           ${navButton("audio", "Audio")}
           ${navButton("settings", "Einstellungen")}
         </nav>
+        <div class="health-strip">
+          ${healthPill("SIP", state.registered ? "online" : "offline", state.registered ? "ok" : "warn")}
+          ${healthPill("CardDAV", syncState === "ok" ? `ok ${lastCardDavSync}` : syncState === "syncing" ? "sync" : contacts.length ? `${contacts.length} lokal` : "leer", syncState === "error" ? "error" : syncState === "ok" ? "ok" : "")}
+          ${healthPill("Audio", audioDevices.permission === "denied" ? "gesperrt" : audioDevices.inputs.length ? `${audioDevices.inputs.length} Mic` : "Standard", audioDevices.permission === "denied" ? "error" : "")}
+        </div>
       </aside>
 
       ${renderMainPanel(visibleContacts)}
@@ -563,6 +607,7 @@ function render(): void {
             <button class="secondary" id="mute" ${state.callState === "idle" ? "disabled" : ""}>${state.muted ? "Mikro an" : "Stumm"}</button>
           </div>
           <div class="sip-note">${escapeHtml(settings.enableWebRtcSip ? "WebRTC/WSS-Fallback" : canUseNativeTelephony() ? "Native SIP/liblinphone" : "Browser-Modus")} · ${escapeHtml(sipNotice)} · Testnummern: ${escapeHtml(settings.allowedTestNumbers || "keine")}</div>
+          <div class="sip-note">Autopilot: CardDAV alle 15 Minuten${lastCardDavSync ? `, zuletzt ${escapeHtml(lastCardDavSync)}` : ""} · SIP-Reconnect alle 60 Sekunden${lastSipRegister ? `, zuletzt ${escapeHtml(lastSipRegister)}` : ""}</div>
           <div class="sip-note">Build ${escapeHtml(buildLabel)} · CardDAV: ${escapeHtml(settings.cardDavUser || "kein Benutzer")} · ${escapeHtml(settings.cardDavUrl || "keine URL")}</div>
         </div>
 
@@ -659,10 +704,12 @@ function bindEvents(): void {
       await saveEnteredSecrets();
       await updateCredentialState();
       configureTelephony();
+      scheduleDesktopMaintenance();
       notice = "Einstellungen gespeichert.";
     } catch (error) {
       await updateCredentialState();
       configureTelephony();
+      scheduleDesktopMaintenance();
       notice = `Einstellungen gespeichert, aber Passwort-Speicherung fehlgeschlagen: ${errorMessage(error, "Unbekannter Fehler")}. Das eingegebene Passwort bleibt fuer diese Sitzung nutzbar.`;
     }
     render();
@@ -688,6 +735,7 @@ async function boot(): Promise<void> {
   render();
   await updateCredentialState();
   await refreshAudioDevices(false);
+  scheduleDesktopMaintenance();
   await startDesktopServices();
 }
 
