@@ -1006,40 +1006,66 @@ fn sip_register(
     password: Option<String>,
 ) -> Result<NativeSipStatus, AppError> {
     let password = stored_or_supplied_secret(SIP_SERVICE, &sip_extension, password)?;
-    match sip_register_linphone(
+    if std::env::var("NIVAKO_ENABLE_LIBLINPHONE").ok().as_deref() == Some("1") {
+        return match sip_register_linphone(
+            &sip_server,
+            &sip_extension,
+            &sip_auth_user,
+            &display_name,
+            &password,
+        ) {
+            Ok(status) => Ok(status),
+            Err(linphone_error) => {
+                let udp_status = sip_register_udp(
+                    &sip_server,
+                    &sip_extension,
+                    &sip_auth_user,
+                    &display_name,
+                    &password,
+                )?;
+                let message = format!(
+                    "{} liblinphone-Core nicht aktiv: {linphone_error}",
+                    udp_status.message
+                );
+                set_sip_snapshot(NativeSipSnapshot {
+                    registered: false,
+                    call_state: "idle".to_string(),
+                    provider: "udp-diagnostic".to_string(),
+                    message: message.clone(),
+                    held: false,
+                    muted: false,
+                });
+                Ok(NativeSipStatus {
+                    registered: false,
+                    message,
+                })
+            }
+        };
+    }
+
+    let udp_status = sip_register_udp(
         &sip_server,
         &sip_extension,
         &sip_auth_user,
         &display_name,
         &password,
-    ) {
-        Ok(status) => Ok(status),
-        Err(linphone_error) => {
-            let udp_status = sip_register_udp(
-                &sip_server,
-                &sip_extension,
-                &sip_auth_user,
-                &display_name,
-                &password,
-            )?;
-            let message = format!(
-                "{} liblinphone-Core nicht aktiv: {linphone_error}",
-                udp_status.message
-            );
-            set_sip_snapshot(NativeSipSnapshot {
-                registered: udp_status.registered,
-                call_state: "idle".to_string(),
-                provider: "udp-diagnostic".to_string(),
-                message: message.clone(),
-                held: false,
-                muted: false,
-            });
-            Ok(NativeSipStatus {
-                registered: udp_status.registered,
-                message,
-            })
-        }
-    }
+    )?;
+    let message = format!(
+        "{} App-Core stabilisiert: liblinphone wird in diesem Build nicht automatisch geladen.",
+        udp_status.message
+    );
+    set_sip_snapshot(NativeSipSnapshot {
+        registered: false,
+        call_state: "idle".to_string(),
+        provider: "udp-diagnostic".to_string(),
+        message: message.clone(),
+        held: false,
+        muted: false,
+    });
+    Ok(NativeSipStatus {
+        registered: false,
+        message,
+    })
 }
 
 #[tauri::command]
