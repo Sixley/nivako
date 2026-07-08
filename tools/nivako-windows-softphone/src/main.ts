@@ -12,8 +12,8 @@ import type { CallEntry, Contact, Settings, SoftphoneState } from "./types";
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.1.8";
-const buildLabel = "0.1.8 Desktop-Shell-Autostart";
+const appVersion = "0.1.9";
+const buildLabel = "0.1.9 Native-SIP-Desktop";
 
 type View = "contacts" | "history" | "favorites" | "audio" | "settings";
 
@@ -28,7 +28,7 @@ const defaultSettings: Settings = {
   allowedTestNumbers: isTauriRuntime() ? "" : "101,*43",
   safeCallMode: !isTauriRuntime(),
   useTelLinks: false,
-  enableWebRtcSip: isTauriRuntime(),
+  enableWebRtcSip: false,
   selectedMicrophoneId: "",
   selectedSpeakerId: ""
 };
@@ -48,6 +48,17 @@ if (isTauriRuntime() && !localStorage.getItem("nivako-softphone.desktop-webrtc-v
   };
   saveSettings(settings);
   localStorage.setItem("nivako-softphone.desktop-webrtc-v1", "1");
+}
+if (isTauriRuntime() && !localStorage.getItem("nivako-softphone.desktop-native-v1")) {
+  settings = {
+    ...settings,
+    allowedTestNumbers: "",
+    safeCallMode: false,
+    enableWebRtcSip: false,
+    sipAuthUser: settings.sipAuthUser || settings.sipExtension
+  };
+  saveSettings(settings);
+  localStorage.setItem("nivako-softphone.desktop-native-v1", "1");
 }
 let telephony: TelephonyAdapter = new SafeTelephonyAdapter(() => settings.useTelLinks && !settings.safeCallMode);
 let contacts = applyFavorites(loadContacts([]), loadFavoriteIds());
@@ -159,7 +170,7 @@ function configureTelephony(): void {
 
 async function registerSip(): Promise<void> {
   try {
-    if (settings.enableWebRtcSip && isTauriRuntime() && !sipPassword && hasStoredSipPassword) {
+    if (isTauriRuntime() && !sipPassword && hasStoredSipPassword) {
       sipPassword = await loadSecretNative("NIVAKO Softphone SIP", settings.sipExtension) || "";
     }
     configureTelephony();
@@ -551,7 +562,7 @@ function render(): void {
             <button class="secondary" id="hold" ${state.callState === "idle" ? "disabled" : ""}>${state.callState === "held" ? "Weiter" : "Halten"}</button>
             <button class="secondary" id="mute" ${state.callState === "idle" ? "disabled" : ""}>${state.muted ? "Mikro an" : "Stumm"}</button>
           </div>
-          <div class="sip-note">${escapeHtml(settings.enableWebRtcSip ? "WebRTC/WSS" : canUseNativeTelephony() ? "UDP-Diagnose" : "Browser-Modus")} · ${escapeHtml(sipNotice)} · Testnummern: ${escapeHtml(settings.allowedTestNumbers || "keine")}</div>
+          <div class="sip-note">${escapeHtml(settings.enableWebRtcSip ? "WebRTC/WSS-Fallback" : canUseNativeTelephony() ? "Native SIP/liblinphone" : "Browser-Modus")} · ${escapeHtml(sipNotice)} · Testnummern: ${escapeHtml(settings.allowedTestNumbers || "keine")}</div>
           <div class="sip-note">Build ${escapeHtml(buildLabel)} · CardDAV: ${escapeHtml(settings.cardDavUser || "kein Benutzer")} · ${escapeHtml(settings.cardDavUrl || "keine URL")}</div>
         </div>
 
