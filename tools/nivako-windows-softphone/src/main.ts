@@ -12,8 +12,8 @@ import type { CallEntry, Contact, Settings, SoftphoneState } from "./types";
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.1.7";
-const buildLabel = "0.1.7 SIP-Call-Diagnose";
+const appVersion = "0.1.8";
+const buildLabel = "0.1.8 Desktop-Shell-Autostart";
 
 type View = "contacts" | "history" | "favorites" | "audio" | "settings";
 
@@ -302,6 +302,26 @@ async function updateCredentialState(): Promise<void> {
   } catch {
     hasStoredCardDavPassword = false;
     hasStoredSipPassword = false;
+  }
+}
+
+async function startDesktopServices(): Promise<void> {
+  if (!isTauriRuntime()) return;
+  const tasks: string[] = [];
+
+  if (hasStoredCardDavPassword) {
+    tasks.push("CardDAV");
+    await syncCardDav();
+  }
+
+  if (hasStoredSipPassword && !state.registered) {
+    tasks.push("SIP");
+    await registerSip();
+  }
+
+  if (tasks.length === 0) {
+    notice = "Desktop-Modus bereit. Hinterlegte CardDAV-/SIP-Zugangsdaten fehlen noch.";
+    render();
   }
 }
 
@@ -652,7 +672,12 @@ function bindEvents(): void {
   });
 }
 
-configureTelephony();
-void updateCredentialState();
-void refreshAudioDevices(false);
-render();
+async function boot(): Promise<void> {
+  configureTelephony();
+  render();
+  await updateCredentialState();
+  await refreshAudioDevices(false);
+  await startDesktopServices();
+}
+
+void boot();
