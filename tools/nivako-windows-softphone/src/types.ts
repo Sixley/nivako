@@ -54,3 +54,12 @@ export interface NativeSipStatus {
   registered: boolean;
   message: string;
 }
+
+export interface NativeSipSnapshot {
+  registered: boolean;
+  call_state: SoftphoneState["callState"] | string;
+  provider: string;
+  message: string;
+  held: boolean;
+  muted: boolean;
+}
