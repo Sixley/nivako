@@ -4,11 +4,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CStr, CString};
 use std::fs;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{ToSocketAddrs, UdpSocket};
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -47,6 +47,8 @@ type LinphoneCall = c_void;
 type LinphoneAddress = c_void;
 type LinphoneAuthInfo = c_void;
 type LinphoneProxyConfig = c_void;
+type LinphoneAccount = c_void;
+type LinphoneAccountParams = c_void;
 
 #[allow(non_camel_case_types)]
 type bool_t = c_int;
@@ -88,29 +90,26 @@ extern "C" {
         domain: *const c_char,
     ) -> *mut LinphoneAuthInfo;
     fn linphone_auth_info_unref(auth_info: *mut LinphoneAuthInfo);
-    fn linphone_core_create_proxy_config(core: *mut LinphoneCore) -> *mut LinphoneProxyConfig;
-    fn linphone_proxy_config_set_identity_address(
-        proxy_config: *mut LinphoneProxyConfig,
+    fn linphone_core_create_account_params(core: *mut LinphoneCore) -> *mut LinphoneAccountParams;
+    fn linphone_core_create_account(
+        core: *mut LinphoneCore,
+        params: *mut LinphoneAccountParams,
+    ) -> *mut LinphoneAccount;
+    fn linphone_core_add_account(core: *mut LinphoneCore, account: *mut LinphoneAccount) -> c_int;
+    fn linphone_core_set_default_account(core: *mut LinphoneCore, account: *mut LinphoneAccount);
+    fn linphone_account_params_set_identity_address(
+        params: *mut LinphoneAccountParams,
         identity: *const LinphoneAddress,
     ) -> c_int;
-    fn linphone_proxy_config_set_server_addr(
-        proxy_config: *mut LinphoneProxyConfig,
+    fn linphone_account_params_set_server_addr(
+        params: *mut LinphoneAccountParams,
         server_address: *const c_char,
     ) -> c_int;
-    fn linphone_proxy_config_enable_register(
-        proxy_config: *mut LinphoneProxyConfig,
-        enable: bool_t,
-    );
-    fn linphone_proxy_config_set_expires(proxy_config: *mut LinphoneProxyConfig, expires: c_int);
-    fn linphone_core_add_proxy_config(
-        core: *mut LinphoneCore,
-        config: *mut LinphoneProxyConfig,
-    ) -> c_int;
-    fn linphone_core_set_default_proxy_config(
-        core: *mut LinphoneCore,
-        config: *mut LinphoneProxyConfig,
-    );
-    fn linphone_proxy_config_refresh_register(proxy_config: *mut LinphoneProxyConfig);
+    fn linphone_account_params_enable_register(params: *mut LinphoneAccountParams, enable: bool_t);
+    fn linphone_account_params_set_expires(params: *mut LinphoneAccountParams, expires: c_int);
+    fn linphone_account_params_unref(params: *mut LinphoneAccountParams);
+    fn linphone_account_refresh_register(account: *mut LinphoneAccount);
+    fn linphone_account_get_state(account: *const LinphoneAccount) -> c_int;
     fn linphone_core_refresh_registers(core: *mut LinphoneCore);
     fn linphone_core_ensure_registered(core: *mut LinphoneCore);
     fn linphone_proxy_config_get_state(proxy_config: *const LinphoneProxyConfig) -> c_int;
@@ -134,6 +133,7 @@ extern "C" {
 struct LinphoneSession {
     core: *mut LinphoneCore,
     proxy: *mut LinphoneProxyConfig,
+    account: *mut LinphoneAccount,
     sip_server: String,
     sip_extension: String,
     held: bool,
@@ -205,6 +205,7 @@ struct SipSidecarClient {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    stderr: ChildStderr,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -611,7 +612,19 @@ fn sip_register_udp(
 }
 
 fn registration_state(proxy: *mut LinphoneProxyConfig) -> (bool, String) {
+    if proxy.is_null() {
+        return (false, "none".to_string());
+    }
     let state = unsafe { linphone_proxy_config_get_state(proxy) };
+    let label = c_string_or_empty(unsafe { linphone_registration_state_to_string(state) });
+    (state == 2, label)
+}
+
+fn account_registration_state(account: *mut LinphoneAccount) -> (bool, String) {
+    if account.is_null() {
+        return (false, "none".to_string());
+    }
+    let state = unsafe { linphone_account_get_state(account) };
     let label = c_string_or_empty(unsafe { linphone_registration_state_to_string(state) });
     (state == 2, label)
 }
@@ -645,7 +658,11 @@ fn set_sip_snapshot(snapshot: NativeSipSnapshot) {
 }
 
 fn session_snapshot(session: &LinphoneSession, message: String) -> NativeSipSnapshot {
-    let (registered, registration_label) = registration_state(session.proxy);
+    let (registered, registration_label) = if !session.account.is_null() {
+        account_registration_state(session.account)
+    } else {
+        registration_state(session.proxy)
+    };
     NativeSipSnapshot {
         registered,
         call_state: call_state(session.core),
@@ -983,7 +1000,7 @@ fn sip_register_linphone(
         linphone_core_set_media_network_reachable(core, 1);
     }
 
-    let result: Result<*mut LinphoneProxyConfig, AppError> = unsafe {
+    let result: Result<*mut LinphoneAccount, AppError> = unsafe {
         let auth = linphone_auth_info_new(
             username.as_ptr(),
             userid.as_ptr(),
@@ -1001,11 +1018,11 @@ fn sip_register_linphone(
         linphone_core_add_auth_info(core, auth);
         linphone_auth_info_unref(auth);
 
-        let proxy = linphone_core_create_proxy_config(core);
-        if proxy.is_null() {
+        let params = linphone_core_create_account_params(core);
+        if params.is_null() {
             linphone_core_unref(core);
             return Err(AppError::Message(
-                "SIP-Proxy konnte nicht erstellt werden".to_string(),
+                "SIP-Account-Parameter konnten nicht erstellt werden".to_string(),
             ));
         }
 
@@ -1017,18 +1034,28 @@ fn sip_register_linphone(
             )));
         }
 
-        let identity_status = linphone_proxy_config_set_identity_address(proxy, address);
+        let identity_status = linphone_account_params_set_identity_address(params, address);
         linphone_address_unref(address);
-        let server_status = linphone_proxy_config_set_server_addr(proxy, c_server.as_ptr());
-        linphone_proxy_config_set_expires(proxy, 600);
-        linphone_proxy_config_enable_register(proxy, 1);
-        let add_status = linphone_core_add_proxy_config(core, proxy);
-        linphone_core_set_default_proxy_config(core, proxy);
+        let server_status = linphone_account_params_set_server_addr(params, c_server.as_ptr());
+        linphone_account_params_set_expires(params, 600);
+        linphone_account_params_enable_register(params, 1);
+
+        let account = linphone_core_create_account(core, params);
+        linphone_account_params_unref(params);
+        if account.is_null() {
+            linphone_core_unref(core);
+            return Err(AppError::Message(
+                "SIP-Account konnte nicht erstellt werden".to_string(),
+            ));
+        }
+
+        let add_status = linphone_core_add_account(core, account);
+        linphone_core_set_default_account(core, account);
         let start_status = linphone_core_start(core);
         linphone_core_set_network_reachable(core, 1);
         linphone_core_set_sip_network_reachable(core, 1);
         linphone_core_set_media_network_reachable(core, 1);
-        linphone_proxy_config_refresh_register(proxy);
+        linphone_account_refresh_register(account);
         linphone_core_refresh_registers(core);
         linphone_core_ensure_registered(core);
 
@@ -1039,13 +1066,14 @@ fn sip_register_linphone(
             )));
         }
 
-        Ok(proxy)
+        Ok(account)
     };
 
-    let proxy = result?;
+    let account = result?;
     let session = LinphoneSession {
         core,
-        proxy,
+        proxy: ptr::null_mut(),
+        account,
         sip_server: sip_server.to_string(),
         sip_extension: sip_extension.to_string(),
         held: false,
@@ -1083,7 +1111,7 @@ fn start_sip_sidecar() -> Result<SipSidecarClient, AppError> {
         .arg("--nivako-sip-sidecar")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| AppError::Message(format!("SIP-Sidecar konnte nicht starten: {error}")))?;
     let stdin = child
@@ -1094,11 +1122,34 @@ fn start_sip_sidecar() -> Result<SipSidecarClient, AppError> {
         .stdout
         .take()
         .ok_or_else(|| AppError::Message("SIP-Sidecar stdout fehlt".to_string()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| AppError::Message("SIP-Sidecar stderr fehlt".to_string()))?;
     Ok(SipSidecarClient {
         child,
         stdin,
         stdout: BufReader::new(stdout),
+        stderr,
     })
+}
+
+fn sidecar_exit_details(client: &mut SipSidecarClient) -> String {
+    let status = client
+        .child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| status.to_string())
+        .unwrap_or_else(|| "Status unbekannt".to_string());
+    let mut stderr = String::new();
+    let _ = client.stderr.read_to_string(&mut stderr);
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        status
+    } else {
+        format!("{status}; stderr: {stderr}")
+    }
 }
 
 fn sip_sidecar_call(command: SipSidecarCommand) -> Result<SipSidecarReply, AppError> {
@@ -1136,10 +1187,11 @@ fn sip_sidecar_call(command: SipSidecarCommand) -> Result<SipSidecarReply, AppEr
     let mut response = String::new();
     match client.stdout.read_line(&mut response) {
         Ok(0) => {
+            let details = sidecar_exit_details(client);
             *guard = None;
-            Err(AppError::Message(
-                "SIP-Sidecar wurde ohne Antwort beendet".to_string(),
-            ))
+            Err(AppError::Message(format!(
+                "SIP-Sidecar wurde ohne Antwort beendet ({details})"
+            )))
         }
         Ok(_) => serde_json::from_str::<SipSidecarReply>(&response).map_err(|error| {
             AppError::Message(format!("SIP-Sidecar Antwort ist unlesbar: {error}"))
@@ -1217,10 +1269,13 @@ fn sidecar_reply(command: SipSidecarCommand) -> SipSidecarReply {
 }
 
 pub fn run_sip_sidecar() {
+    std::panic::set_hook(Box::new(|info| {
+        eprintln!("SIP-Sidecar Panic: {info}");
+    }));
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     for line in stdin.lock().lines() {
-        let reply = match line {
+        let reply = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match line {
             Ok(line) => match serde_json::from_str::<SipSidecarCommand>(&line) {
                 Ok(command) => sidecar_reply(command),
                 Err(error) => SipSidecarReply::Error {
@@ -1230,7 +1285,10 @@ pub fn run_sip_sidecar() {
             Err(error) => SipSidecarReply::Error {
                 message: format!("SIP-Sidecar Eingabe fehlgeschlagen: {error}"),
             },
-        };
+        }))
+        .unwrap_or_else(|_| SipSidecarReply::Error {
+            message: "SIP-Sidecar Panic wurde abgefangen".to_string(),
+        });
         if let Ok(serialized) = serde_json::to_string(&reply) {
             let _ = writeln!(stdout, "{serialized}");
             let _ = stdout.flush();
