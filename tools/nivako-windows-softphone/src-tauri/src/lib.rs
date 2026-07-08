@@ -1000,7 +1000,7 @@ fn sip_register_linphone(
         linphone_core_set_media_network_reachable(core, 1);
     }
 
-    let result: Result<*mut LinphoneAccount, AppError> = unsafe {
+    let result: Result<(*mut LinphoneAccount, c_int), AppError> = unsafe {
         let auth = linphone_auth_info_new(
             username.as_ptr(),
             userid.as_ptr(),
@@ -1059,17 +1059,17 @@ fn sip_register_linphone(
         linphone_core_refresh_registers(core);
         linphone_core_ensure_registered(core);
 
-        if identity_status != 0 || server_status != 0 || add_status != 0 || start_status != 0 {
+        if identity_status != 0 || server_status != 0 || add_status != 0 {
             linphone_core_unref(core);
             return Err(AppError::Message(format!(
                 "SIP-Konfiguration wurde von liblinphone abgelehnt (identity={identity_status}, server={server_status}, add={add_status}, start={start_status})"
             )));
         }
 
-        Ok(account)
+        Ok((account, start_status))
     };
 
-    let account = result?;
+    let (account, start_status) = result?;
     let session = LinphoneSession {
         core,
         proxy: ptr::null_mut(),
@@ -1089,7 +1089,7 @@ fn sip_register_linphone(
     ensure_sip_worker();
     tick_session_for(80, 100);
     let snapshot = refresh_sip_snapshot_from_session(format!(
-        "SIP-Registrierung geprueft: {display_name} / {sip_extension}@{domain}."
+        "SIP-Registrierung geprueft: {display_name} / {sip_extension}@{domain} (core_start={start_status})."
     ))
     .ok_or_else(|| {
         AppError::Message("SIP-Sitzung wurde nach Registrierung nicht erstellt".to_string())
