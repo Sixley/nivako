@@ -22,6 +22,16 @@ struct NativeSipStatus {
     message: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct NativeSipSnapshot {
+    registered: bool,
+    call_state: String,
+    provider: String,
+    message: String,
+    held: bool,
+    muted: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct CardDavSyncResult {
     xml: String,
@@ -91,6 +101,8 @@ extern "C" {
         address: *const LinphoneAddress,
     ) -> *mut LinphoneCall;
     fn linphone_core_get_current_call(core: *const LinphoneCore) -> *mut LinphoneCall;
+    fn linphone_call_get_state(call: *const LinphoneCall) -> c_int;
+    fn linphone_call_state_to_string(state: c_int) -> *const c_char;
     fn linphone_core_terminate_all_calls(core: *mut LinphoneCore) -> c_int;
     fn linphone_core_pause_call(core: *mut LinphoneCore, call: *mut LinphoneCall) -> c_int;
     fn linphone_core_resume_call(core: *mut LinphoneCore, call: *mut LinphoneCall) -> c_int;
@@ -120,6 +132,16 @@ impl Drop for LinphoneSession {
 
 static SIP_SESSION: Lazy<Arc<Mutex<Option<LinphoneSession>>>> =
     Lazy::new(|| Arc::new(Mutex::new(None)));
+static SIP_SNAPSHOT: Lazy<Arc<Mutex<NativeSipSnapshot>>> = Lazy::new(|| {
+    Arc::new(Mutex::new(NativeSipSnapshot {
+        registered: false,
+        call_state: "idle".to_string(),
+        provider: "none".to_string(),
+        message: "SIP nicht registriert.".to_string(),
+        held: false,
+        muted: false,
+    }))
+});
 static SIP_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, thiserror::Error)]
@@ -522,6 +544,56 @@ fn registration_state(proxy: *mut LinphoneProxyConfig) -> (bool, String) {
     (state == 2, label)
 }
 
+fn call_state(core: *mut LinphoneCore) -> String {
+    let call = unsafe { linphone_core_get_current_call(core) };
+    if call.is_null() {
+        return "idle".to_string();
+    }
+    let state = unsafe { linphone_call_get_state(call) };
+    let label = c_string_or_empty(unsafe { linphone_call_state_to_string(state) });
+    let lower = label.to_ascii_lowercase();
+    if lower.contains("streams running") || lower.contains("connected") {
+        "active".to_string()
+    } else if lower.contains("paused") || lower.contains("pausing") {
+        "held".to_string()
+    } else if lower.contains("incoming") || lower.contains("outgoing") || lower.contains("ringing") {
+        "ringing".to_string()
+    } else if lower.contains("end") || lower.contains("released") || lower.contains("error") {
+        "idle".to_string()
+    } else {
+        label
+    }
+}
+
+fn set_sip_snapshot(snapshot: NativeSipSnapshot) {
+    if let Ok(mut guard) = SIP_SNAPSHOT.lock() {
+        *guard = snapshot;
+    }
+}
+
+fn session_snapshot(session: &LinphoneSession, message: String) -> NativeSipSnapshot {
+    let (registered, registration_label) = registration_state(session.proxy);
+    NativeSipSnapshot {
+        registered,
+        call_state: call_state(session.core),
+        provider: "liblinphone".to_string(),
+        message: format!("{message} SIP-Status: {registration_label}"),
+        held: session.held,
+        muted: session.muted,
+    }
+}
+
+fn refresh_sip_snapshot_from_session(message: String) -> Option<NativeSipSnapshot> {
+    let Ok(mut guard) = SIP_SESSION.lock() else {
+        return None;
+    };
+    let session = guard.as_mut()?;
+    unsafe { linphone_core_iterate(session.core) };
+    let snapshot = session_snapshot(session, message);
+    set_sip_snapshot(snapshot.clone());
+    Some(snapshot)
+}
+
 fn ensure_sip_worker() {
     if SIP_WORKER_STARTED.swap(true, Ordering::SeqCst) {
         return;
@@ -532,6 +604,8 @@ fn ensure_sip_worker() {
         if let Ok(mut guard) = session.lock() {
             if let Some(active) = guard.as_mut() {
                 unsafe { linphone_core_iterate(active.core) };
+                let snapshot = session_snapshot(active, "Native SIP aktiv.".to_string());
+                set_sip_snapshot(snapshot);
             }
         }
         thread::sleep(Duration::from_millis(50));
@@ -750,6 +824,101 @@ fn report_carddav_url(
     Ok(None)
 }
 
+fn sip_register_linphone(
+    sip_server: &str,
+    sip_extension: &str,
+    sip_auth_user: &str,
+    display_name: &str,
+    password: &str,
+) -> Result<NativeSipStatus, AppError> {
+    let domain = normalize_domain(sip_server);
+    let server_addr = normalize_sip_server(sip_server);
+    let identity = format!("sip:{sip_extension}@{domain}");
+    let username = cstring(sip_auth_user, "SIP-Auth-ID")?;
+    let userid = cstring(sip_extension, "SIP-Benutzer")?;
+    let passwd = cstring(password, "SIP-Passwort")?;
+    let c_domain = cstring(&domain, "SIP-Domain")?;
+    let c_identity = cstring(&identity, "SIP-Identitaet")?;
+    let c_server = cstring(&server_addr, "SIP-Server")?;
+
+    let core = unsafe { linphone_core_new(ptr::null(), ptr::null(), ptr::null(), ptr::null_mut()) };
+    if core.is_null() {
+        return Err(AppError::Message("liblinphone Core konnte nicht erstellt werden".to_string()));
+    }
+
+    let result: Result<*mut LinphoneProxyConfig, AppError> = unsafe {
+        let auth = linphone_auth_info_new(
+            username.as_ptr(),
+            userid.as_ptr(),
+            passwd.as_ptr(),
+            ptr::null(),
+            ptr::null(),
+            c_domain.as_ptr(),
+        );
+        if auth.is_null() {
+            linphone_core_unref(core);
+            return Err(AppError::Message("SIP-Auth konnte nicht erstellt werden".to_string()));
+        }
+        linphone_core_add_auth_info(core, auth);
+        linphone_auth_info_unref(auth);
+
+        let proxy = linphone_core_create_proxy_config(core);
+        if proxy.is_null() {
+            linphone_core_unref(core);
+            return Err(AppError::Message("SIP-Proxy konnte nicht erstellt werden".to_string()));
+        }
+
+        let address = linphone_address_new(c_identity.as_ptr());
+        if address.is_null() {
+            linphone_core_unref(core);
+            return Err(AppError::Message(format!("Ungueltige SIP-Identitaet: {identity}")));
+        }
+
+        let identity_status = linphone_proxy_config_set_identity_address(proxy, address);
+        linphone_address_unref(address);
+        let server_status = linphone_proxy_config_set_server_addr(proxy, c_server.as_ptr());
+        linphone_proxy_config_enable_register(proxy, 1);
+        let add_status = linphone_core_add_proxy_config(core, proxy);
+        linphone_core_set_default_proxy_config(core, proxy);
+        let start_status = linphone_core_start(core);
+
+        if identity_status != 0 || server_status != 0 || add_status != 0 || start_status != 0 {
+            linphone_core_unref(core);
+            return Err(AppError::Message("SIP-Konfiguration wurde von liblinphone abgelehnt".to_string()));
+        }
+
+        Ok(proxy)
+    };
+
+    let proxy = result?;
+    let session = LinphoneSession {
+        core,
+        proxy,
+        sip_server: sip_server.to_string(),
+        sip_extension: sip_extension.to_string(),
+        held: false,
+        muted: false,
+    };
+
+    let mut guard = SIP_SESSION
+        .lock()
+        .map_err(|_| AppError::Message("SIP-Sitzung ist blockiert".to_string()))?;
+    *guard = Some(session);
+    drop(guard);
+
+    ensure_sip_worker();
+    tick_session_for(80, 100);
+    let snapshot = refresh_sip_snapshot_from_session(format!(
+        "SIP-Registrierung geprueft: {display_name} / {sip_extension}@{domain}."
+    ))
+    .ok_or_else(|| AppError::Message("SIP-Sitzung wurde nach Registrierung nicht erstellt".to_string()))?;
+
+    Ok(NativeSipStatus {
+        registered: snapshot.registered,
+        message: snapshot.message,
+    })
+}
+
 #[tauri::command]
 fn save_secret(service: String, account: String, password: String) -> Result<(), AppError> {
     write_fallback_secret(&service, &account, &password)?;
@@ -837,13 +1006,51 @@ fn sip_register(
     password: Option<String>,
 ) -> Result<NativeSipStatus, AppError> {
     let password = stored_or_supplied_secret(SIP_SERVICE, &sip_extension, password)?;
-    sip_register_udp(
+    match sip_register_linphone(
         &sip_server,
         &sip_extension,
         &sip_auth_user,
         &display_name,
         &password,
-    )
+    ) {
+        Ok(status) => Ok(status),
+        Err(linphone_error) => {
+            let udp_status = sip_register_udp(
+                &sip_server,
+                &sip_extension,
+                &sip_auth_user,
+                &display_name,
+                &password,
+            )?;
+            let message = format!(
+                "{} liblinphone-Core nicht aktiv: {linphone_error}",
+                udp_status.message
+            );
+            set_sip_snapshot(NativeSipSnapshot {
+                registered: udp_status.registered,
+                call_state: "idle".to_string(),
+                provider: "udp-diagnostic".to_string(),
+                message: message.clone(),
+                held: false,
+                muted: false,
+            });
+            Ok(NativeSipStatus {
+                registered: udp_status.registered,
+                message,
+            })
+        }
+    }
+}
+
+#[tauri::command]
+fn sip_status() -> Result<NativeSipSnapshot, AppError> {
+    if let Some(snapshot) = refresh_sip_snapshot_from_session("Native SIP aktiv.".to_string()) {
+        return Ok(snapshot);
+    }
+    SIP_SNAPSHOT
+        .lock()
+        .map(|guard| guard.clone())
+        .map_err(|_| AppError::Message("SIP-Status ist blockiert".to_string()))
 }
 
 #[tauri::command]
@@ -876,18 +1083,20 @@ fn sip_dial(
             call
         };
         tick_core_for(session.core, 10, 100);
-        let (registered, state_label) = registration_state(session.proxy);
+        let (_registered, state_label) = registration_state(session.proxy);
         if call.is_null() {
             return Err(AppError::Message(format!(
                 "Anruf konnte nicht gestartet werden. SIP-Status: {state_label}"
             )));
         }
+        let snapshot = session_snapshot(
+            session,
+            format!("Nativer Anruf gestartet: {} -> {number}.", session.sip_extension),
+        );
+        set_sip_snapshot(snapshot.clone());
         Ok(NativeSipStatus {
-            registered,
-            message: format!(
-                "Nativer Anruf gestartet: {} -> {number}. SIP-Status: {state_label}",
-                session.sip_extension
-            ),
+            registered: snapshot.registered,
+            message: snapshot.message,
         })
     })
 }
@@ -897,10 +1106,12 @@ fn sip_hangup() -> Result<NativeSipStatus, AppError> {
     with_session(|session| {
         unsafe { linphone_core_terminate_all_calls(session.core) };
         tick_core_for(session.core, 5, 80);
-        let (registered, state_label) = registration_state(session.proxy);
+        session.held = false;
+        let snapshot = session_snapshot(session, "Anruf beendet.".to_string());
+        set_sip_snapshot(snapshot.clone());
         Ok(NativeSipStatus {
-            registered,
-            message: format!("Anruf beendet. SIP-Status: {state_label}"),
+            registered: snapshot.registered,
+            message: snapshot.message,
         })
     })
 }
@@ -926,14 +1137,18 @@ fn sip_hold() -> Result<NativeSipStatus, AppError> {
         }
         session.held = !session.held;
         tick_core_for(session.core, 5, 80);
-        let (registered, state_label) = registration_state(session.proxy);
-        Ok(NativeSipStatus {
-            registered,
-            message: if session.held {
-                format!("Anruf gehalten. SIP-Status: {state_label}")
+        let snapshot = session_snapshot(
+            session,
+            if session.held {
+                "Anruf gehalten.".to_string()
             } else {
-                format!("Anruf fortgesetzt. SIP-Status: {state_label}")
+                "Anruf fortgesetzt.".to_string()
             },
+        );
+        set_sip_snapshot(snapshot.clone());
+        Ok(NativeSipStatus {
+            registered: snapshot.registered,
+            message: snapshot.message,
         })
     })
 }
@@ -944,14 +1159,18 @@ fn sip_mute(muted: bool) -> Result<NativeSipStatus, AppError> {
         unsafe { linphone_core_enable_mic(session.core, if muted { 0 } else { 1 }) };
         session.muted = muted;
         tick_core_for(session.core, 2, 60);
-        let (registered, state_label) = registration_state(session.proxy);
-        Ok(NativeSipStatus {
-            registered,
-            message: if muted {
-                format!("Mikrofon stumm. SIP-Status: {state_label}")
+        let snapshot = session_snapshot(
+            session,
+            if muted {
+                "Mikrofon stumm.".to_string()
             } else {
-                format!("Mikrofon aktiv. SIP-Status: {state_label}")
+                "Mikrofon aktiv.".to_string()
             },
+        );
+        set_sip_snapshot(snapshot.clone());
+        Ok(NativeSipStatus {
+            registered: snapshot.registered,
+            message: snapshot.message,
         })
     })
 }
@@ -976,10 +1195,11 @@ fn sip_dtmf(digit: String) -> Result<NativeSipStatus, AppError> {
             ));
         }
         tick_core_for(session.core, 2, 60);
-        let (registered, state_label) = registration_state(session.proxy);
+        let snapshot = session_snapshot(session, format!("DTMF gesendet: {dtmf}."));
+        set_sip_snapshot(snapshot.clone());
         Ok(NativeSipStatus {
-            registered,
-            message: format!("DTMF gesendet: {dtmf}. SIP-Status: {state_label}"),
+            registered: snapshot.registered,
+            message: snapshot.message,
         })
     })
 }
@@ -992,6 +1212,7 @@ pub fn run() {
             get_secret,
             sync_carddav,
             sip_register,
+            sip_status,
             sip_dial,
             sip_hangup,
             sip_hold,
