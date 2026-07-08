@@ -6,3 +6,4 @@ target/
 .env.local
 *.log
 src-tauri/linphone-runtime/*.dll
+src-tauri/linphone-runtime/share/

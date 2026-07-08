@@ -24,8 +24,18 @@ for (const dll of dlls) {
   fs.copyFileSync(path.join(src, dll), path.join(dest, dll));
 }
 
+const shareSrc = path.join(src, "share");
+if (fs.existsSync(shareSrc)) {
+  fs.cpSync(shareSrc, path.join(dest, "share"), { recursive: true, force: true });
+}
+
 if (!fs.existsSync(path.join(dest, "liblinphone.dll"))) {
   throw new Error("liblinphone.dll was not copied next to nivako-softphone.exe");
 }
 
-console.log(`Staged ${dlls.length} Linphone runtime DLLs next to the release executable.`);
+const vcardGrammar = path.join(dest, "share", "belr", "grammars", "vcard_grammar.belr");
+if (!fs.existsSync(vcardGrammar)) {
+  throw new Error("BELR vCard grammar was not copied next to nivako-softphone.exe");
+}
+
+console.log(`Staged ${dlls.length} Linphone runtime DLLs and share resources next to the release executable.`);

@@ -60,23 +60,33 @@ jobs:
           "LINPHONE_LIB_DIR=$((Split-Path $lib.FullName -Parent))" >> $env:GITHUB_ENV
           Write-Host "Using liblinphone from $($lib.FullName)"
 
-      - name: Stage Linphone runtime DLLs
+      - name: Stage Linphone runtime
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $runtime = "$env:SOFTPHONE_DIR\src-tauri\linphone-runtime"
           New-Item -ItemType Directory -Force -Path $runtime | Out-Null
           Remove-Item -Path "$runtime\*.dll" -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "$runtime\share" -Recurse -Force -ErrorAction SilentlyContinue
           $dlls = Get-ChildItem -Path linphone-sdk -Recurse -Filter *.dll
           if (-not $dlls) {
             throw "No Linphone runtime DLLs were found in the SDK archive"
           }
           $dlls | Copy-Item -Destination $runtime -Force
+          $share = Get-ChildItem -Path linphone-sdk -Recurse -Directory -Filter share | Select-Object -First 1
+          if (-not $share) {
+            throw "Linphone SDK share directory was not found"
+          }
+          Copy-Item -Path $share.FullName -Destination "$runtime\share" -Recurse -Force
           if (-not (Test-Path "$runtime\liblinphone.dll")) {
             Get-ChildItem -Path $runtime | Select-Object Name
             throw "liblinphone.dll was not staged for the Windows runtime"
           }
-          Write-Host "Staged $($dlls.Count) Linphone runtime DLLs in $runtime"
+          if (-not (Test-Path "$runtime\share\belr\grammars\vcard_grammar.belr")) {
+            Get-ChildItem -Path "$runtime\share" -Recurse -Filter "vcard_grammar.belr" | Select-Object FullName
+            throw "BELR vCard grammar is missing from the staged Linphone runtime"
+          }
+          Write-Host "Staged $($dlls.Count) Linphone runtime DLLs and share resources in $runtime"
 
       - name: Test
         working-directory: ${{ env.SOFTPHONE_DIR }}
@@ -112,14 +122,25 @@ jobs:
           if (-not (Test-Path "$release\liblinphone.dll")) {
             Copy-Item "$env:SOFTPHONE_DIR\src-tauri\linphone-runtime\*.dll" -Destination $release -Force
           }
+          if (-not (Test-Path "$release\share\belr\grammars\vcard_grammar.belr")) {
+            Copy-Item "$env:SOFTPHONE_DIR\src-tauri\linphone-runtime\share" -Destination "$release\share" -Recurse -Force
+          }
           if (-not (Test-Path "$release\liblinphone.dll")) {
             throw "liblinphone.dll is missing next to the release executable"
+          }
+          if (-not (Test-Path "$release\share\belr\grammars\vcard_grammar.belr")) {
+            throw "BELR vCard grammar is missing next to the release executable"
           }
           $manifests = Get-ChildItem -Path $release -Recurse -Include installer.nsi,*.wxs -ErrorAction SilentlyContinue
           $manifestHit = $manifests | Where-Object { Select-String -Path $_.FullName -Pattern "liblinphone.dll" -Quiet } | Select-Object -First 1
           if (-not $manifestHit) {
             $manifests | Select-Object FullName
             throw "liblinphone.dll is missing from the generated installer manifests"
+          }
+          $grammarManifestHit = $manifests | Where-Object { Select-String -Path $_.FullName -Pattern "vcard_grammar.belr" -Quiet } | Select-Object -First 1
+          if (-not $grammarManifestHit) {
+            $manifests | Select-Object FullName
+            throw "BELR grammar resources are missing from the generated installer manifests"
           }
           Write-Host "Installer manifest includes liblinphone.dll via $($manifestHit.FullName)"
 
@@ -136,8 +157,12 @@ jobs:
           }
           Copy-Item $exe.FullName $portable
           Get-ChildItem -Path "$env:SOFTPHONE_DIR\src-tauri\linphone-runtime" -Filter *.dll | Copy-Item -Destination $portable -Force
+          Copy-Item "$env:SOFTPHONE_DIR\src-tauri\linphone-runtime\share" -Destination "$portable\share" -Recurse -Force
           if (-not (Test-Path "$portable\liblinphone.dll")) {
             throw "Portable package is missing liblinphone.dll"
+          }
+          if (-not (Test-Path "$portable\share\belr\grammars\vcard_grammar.belr")) {
+            throw "Portable package is missing BELR vCard grammar"
           }
           Compress-Archive -Path "$portable\*" -DestinationPath "artifacts\nivako-softphone-windows-portable.zip" -Force
 

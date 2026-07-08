@@ -45,6 +45,9 @@ fn main() {
         let runtime_dir = std::path::Path::new("linphone-runtime");
         let _ = std::fs::create_dir_all(runtime_dir);
         let _ = std::fs::write(runtime_dir.join(".cargo-check-placeholder.dll"), []);
+        let grammar_dir = runtime_dir.join("share").join("belr").join("grammars");
+        let _ = std::fs::create_dir_all(&grammar_dir);
+        let _ = std::fs::write(grammar_dir.join("vcard_grammar.belr"), []);
     }
 
     tauri_build::build();
