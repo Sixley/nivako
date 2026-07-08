@@ -12,8 +12,8 @@ import type { CallEntry, Contact, NativeSipSnapshot, Settings, SoftphoneState } 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.2.10";
-const buildLabel = "0.2.10 Native Start Tolerant";
+const appVersion = "0.2.11";
+const buildLabel = "0.2.11 Audio UI Repair";
 const cardDavRefreshMs = 15 * 60 * 1000;
 const sipReconnectMs = 60 * 1000;
 const sipStatusPollMs = 2000;
@@ -160,6 +160,16 @@ function isEditingElement(element: Element | null): boolean {
 function renderUnlessEditing(): void {
   if (isEditingElement(document.activeElement)) return;
   render();
+}
+
+function renderAndRestoreInput(selector: string, start: number | null, end: number | null): void {
+  render();
+  const input = document.querySelector<HTMLInputElement>(selector);
+  if (!input) return;
+  input.focus();
+  if (start !== null && end !== null) {
+    input.setSelectionRange(start, end);
+  }
 }
 
 function applyTelephonyStatus(status: string, registered?: boolean): void {
@@ -543,9 +553,12 @@ function renderHistoryList(emptyText: string): string {
     <div class="contact-list">
       ${callHistory.map((entry) => `
         <button class="history-row" data-number="${escapeHtml(entry.number)}">
-          <span>${entry.direction === "missed" ? "!" : entry.direction === "inbound" ? "↓" : "↑"}</span>
-          <strong>${escapeHtml(entry.name)}</strong>
-          <small>${escapeHtml(entry.result || "")} · ${escapeHtml(entry.time)}</small>
+          <span class="history-icon">${entry.direction === "missed" ? "!" : entry.direction === "inbound" ? "↓" : "↑"}</span>
+          <span class="history-main">
+            <strong>${escapeHtml(entry.name)}</strong>
+            <small>${escapeHtml(entry.number)}</small>
+          </span>
+          <small class="history-meta">${escapeHtml(entry.result || "")} · ${escapeHtml(entry.time)}</small>
         </button>
       `).join("")}
     </div>
@@ -744,9 +757,12 @@ function render(): void {
           <h2>Letzte Aktionen <small>lokal gespeichert</small></h2>
           ${callHistory.slice(0, 5).map((entry) => `
             <button class="history-row" data-number="${escapeHtml(entry.number)}">
-              <span>${entry.direction === "missed" ? "!" : entry.direction === "inbound" ? "↓" : "↑"}</span>
-              <strong>${escapeHtml(entry.name)}</strong>
-              <small>${escapeHtml(entry.result || "")} · ${escapeHtml(entry.time)}</small>
+              <span class="history-icon">${entry.direction === "missed" ? "!" : entry.direction === "inbound" ? "↓" : "↑"}</span>
+              <span class="history-main">
+                <strong>${escapeHtml(entry.name)}</strong>
+                <small>${escapeHtml(entry.number)}</small>
+              </span>
+              <small class="history-meta">${escapeHtml(entry.result || "")} · ${escapeHtml(entry.time)}</small>
             </button>
           `).join("") || '<div class="empty">Noch keine Aktionen</div>'}
         </div>
@@ -766,12 +782,15 @@ function bindEvents(): void {
   });
 
   document.querySelector<HTMLInputElement>("#search")?.addEventListener("input", (event) => {
-    query = (event.target as HTMLInputElement).value;
-    render();
+    const input = event.target as HTMLInputElement;
+    query = input.value;
+    renderAndRestoreInput("#search", input.selectionStart, input.selectionEnd);
   });
 
   document.querySelector<HTMLInputElement>("#number-input")?.addEventListener("input", (event) => {
-    state = { ...state, activeNumber: (event.target as HTMLInputElement).value };
+    const input = event.target as HTMLInputElement;
+    state = { ...state, activeNumber: input.value, activeContact: undefined };
+    renderAndRestoreInput("#number-input", input.selectionStart, input.selectionEnd);
   });
 
   document.querySelectorAll<HTMLButtonElement>("[data-digit]").forEach((button) => {

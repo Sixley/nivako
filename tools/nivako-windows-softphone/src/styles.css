@@ -50,7 +50,7 @@ button:disabled {
 
 .shell {
   display: grid;
-  grid-template-columns: 224px minmax(440px, 1fr) 392px;
+  grid-template-columns: 224px minmax(520px, 1fr) minmax(360px, 392px);
   width: 100%;
   height: 100%;
   min-width: 0;
@@ -268,12 +268,12 @@ h2 small {
 .contact-list {
   display: grid;
   align-content: start;
-  gap: 8px;
+  gap: 10px;
   min-height: 0;
   flex: 1;
   margin-top: 16px;
   overflow: auto;
-  padding-right: 4px;
+  padding-right: 8px;
 }
 
 .contact-row {
@@ -310,9 +310,10 @@ h2 small {
 }
 
 .contact-select {
-  grid-template-columns: 44px minmax(0, 1fr) minmax(128px, auto);
+  grid-template-columns: 44px minmax(180px, 1fr) minmax(140px, 190px);
   gap: 12px;
-  padding: 11px;
+  min-height: 66px;
+  padding: 11px 12px;
   text-align: left;
 }
 
@@ -329,14 +330,26 @@ h2 small {
 
 .contact-main {
   display: grid;
+  gap: 3px;
   min-width: 0;
 }
 
 .contact-main strong,
 .contact-main small {
   overflow: hidden;
+  min-width: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.contact-main strong {
+  font-size: 15px;
+  line-height: 1.25;
+}
+
+.contact-main small {
+  font-size: 12px;
+  line-height: 1.25;
 }
 
 .contact-number {
@@ -406,6 +419,7 @@ h2 small {
 .call-card,
 .history {
   min-width: 0;
+  overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 7px;
   padding: 18px;
@@ -475,8 +489,12 @@ h2 small {
 }
 
 .callee strong {
+  overflow: hidden;
   color: var(--ink);
   font-size: 25px;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .keypad {
@@ -568,11 +586,42 @@ h2 small {
 }
 
 .history-row {
-  grid-template-columns: 28px minmax(0, 1fr) auto;
-  gap: 8px;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 10px;
   margin-bottom: 8px;
   padding: 10px;
   text-align: left;
+}
+
+.history-icon {
+  color: var(--graphite);
+  font-weight: 900;
+}
+
+.history-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.history-main strong,
+.history-main small,
+.history-meta {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-main strong {
+  font-size: 14px;
+  line-height: 1.2;
+}
+
+.history-meta {
+  grid-column: 2;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .empty {
@@ -621,5 +670,30 @@ h2 small {
 
   .sidebar {
     display: none;
+  }
+}
+
+@media (max-width: 860px) {
+  html,
+  body,
+  #app {
+    overflow: auto;
+  }
+
+  .shell {
+    grid-template-columns: 1fr;
+    height: auto;
+    min-height: 100%;
+    overflow: visible;
+  }
+
+  .contacts-panel,
+  .phone-panel {
+    border-right: 0;
+    overflow: visible;
+  }
+
+  .phone-panel {
+    padding-top: 0;
   }
 }

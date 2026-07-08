@@ -6,7 +6,7 @@ use std::ffi::{CStr, CString};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{ToSocketAddrs, UdpSocket};
-use std::os::raw::{c_char, c_int, c_void};
+use std::os::raw::{c_char, c_float, c_int, c_void};
 use std::path::PathBuf;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::ptr;
@@ -76,6 +76,26 @@ extern "C" {
     fn linphone_core_set_network_reachable(core: *mut LinphoneCore, reachable: bool_t);
     fn linphone_core_set_sip_network_reachable(core: *mut LinphoneCore, reachable: bool_t);
     fn linphone_core_set_media_network_reachable(core: *mut LinphoneCore, reachable: bool_t);
+    fn linphone_core_get_sound_devices(core: *mut LinphoneCore) -> *const *const c_char;
+    fn linphone_core_sound_device_can_capture(
+        core: *mut LinphoneCore,
+        device: *const c_char,
+    ) -> bool_t;
+    fn linphone_core_sound_device_can_playback(
+        core: *mut LinphoneCore,
+        device: *const c_char,
+    ) -> bool_t;
+    fn linphone_core_get_playback_device(core: *mut LinphoneCore) -> *const c_char;
+    fn linphone_core_get_capture_device(core: *mut LinphoneCore) -> *const c_char;
+    fn linphone_core_get_ringer_device(core: *mut LinphoneCore) -> *const c_char;
+    fn linphone_core_set_playback_device(core: *mut LinphoneCore, device: *const c_char) -> c_int;
+    fn linphone_core_set_capture_device(core: *mut LinphoneCore, device: *const c_char) -> c_int;
+    fn linphone_core_set_ringer_device(core: *mut LinphoneCore, device: *const c_char) -> c_int;
+    fn linphone_core_set_media_device(core: *mut LinphoneCore, device: *const c_char) -> c_int;
+    fn linphone_core_set_play_level(core: *mut LinphoneCore, level: c_int);
+    fn linphone_core_set_rec_level(core: *mut LinphoneCore, level: c_int);
+    fn linphone_core_set_mic_gain_db(core: *mut LinphoneCore, level: c_float);
+    fn linphone_core_set_playback_gain_db(core: *mut LinphoneCore, level: c_float);
     fn linphone_core_set_sip_transports(
         core: *mut LinphoneCore,
         transports: *const LinphoneSipTransports,
@@ -651,6 +671,96 @@ fn call_state(core: *mut LinphoneCore) -> String {
     }
 }
 
+fn linphone_audio_summary(core: *mut LinphoneCore) -> String {
+    let playback = c_string_or_empty(unsafe { linphone_core_get_playback_device(core) });
+    let capture = c_string_or_empty(unsafe { linphone_core_get_capture_device(core) });
+    let ringer = c_string_or_empty(unsafe { linphone_core_get_ringer_device(core) });
+    let mut devices = Vec::new();
+    let table = unsafe { linphone_core_get_sound_devices(core) };
+    if !table.is_null() {
+        for index in 0..32 {
+            let device = unsafe { *table.add(index) };
+            if device.is_null() {
+                break;
+            }
+            let name = c_string_or_empty(device);
+            let can_play = unsafe { linphone_core_sound_device_can_playback(core, device) } != 0;
+            let can_capture = unsafe { linphone_core_sound_device_can_capture(core, device) } != 0;
+            let role = match (can_play, can_capture) {
+                (true, true) => "in/out",
+                (true, false) => "out",
+                (false, true) => "in",
+                (false, false) => "no-audio",
+            };
+            devices.push(format!("{name} ({role})"));
+        }
+    }
+
+    let preview = if devices.is_empty() {
+        "keine liblinphone-Audio-Geraete".to_string()
+    } else {
+        devices
+            .iter()
+            .take(4)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "Audio: playback={}, capture={}, ringer={}, devices={} [{}]",
+        if playback.is_empty() {
+            "leer"
+        } else {
+            &playback
+        },
+        if capture.is_empty() { "leer" } else { &capture },
+        if ringer.is_empty() { "leer" } else { &ringer },
+        devices.len(),
+        preview
+    )
+}
+
+fn configure_linphone_audio(core: *mut LinphoneCore) -> String {
+    unsafe {
+        linphone_core_enable_mic(core, 1);
+        linphone_core_set_play_level(core, 100);
+        linphone_core_set_rec_level(core, 100);
+        linphone_core_set_mic_gain_db(core, 0.0);
+        linphone_core_set_playback_gain_db(core, 0.0);
+
+        let table = linphone_core_get_sound_devices(core);
+        if !table.is_null() {
+            let mut playback_device: *const c_char = ptr::null();
+            let mut capture_device: *const c_char = ptr::null();
+            for index in 0..32 {
+                let device = *table.add(index);
+                if device.is_null() {
+                    break;
+                }
+                if playback_device.is_null()
+                    && linphone_core_sound_device_can_playback(core, device) != 0
+                {
+                    playback_device = device;
+                }
+                if capture_device.is_null()
+                    && linphone_core_sound_device_can_capture(core, device) != 0
+                {
+                    capture_device = device;
+                }
+            }
+            if !playback_device.is_null() {
+                let _ = linphone_core_set_playback_device(core, playback_device);
+                let _ = linphone_core_set_ringer_device(core, playback_device);
+                let _ = linphone_core_set_media_device(core, playback_device);
+            }
+            if !capture_device.is_null() {
+                let _ = linphone_core_set_capture_device(core, capture_device);
+            }
+        }
+    }
+    linphone_audio_summary(core)
+}
+
 fn set_sip_snapshot(snapshot: NativeSipSnapshot) {
     if let Ok(mut guard) = SIP_SNAPSHOT.lock() {
         *guard = snapshot;
@@ -667,7 +777,10 @@ fn session_snapshot(session: &LinphoneSession, message: String) -> NativeSipSnap
         registered,
         call_state: call_state(session.core),
         provider: "liblinphone".to_string(),
-        message: format!("{message} SIP-Status: {registration_label}"),
+        message: format!(
+            "{message} SIP-Status: {registration_label}. {}",
+            linphone_audio_summary(session.core)
+        ),
         held: session.held,
         muted: session.muted,
     }
@@ -999,6 +1112,7 @@ fn sip_register_linphone(
         linphone_core_set_sip_network_reachable(core, 1);
         linphone_core_set_media_network_reachable(core, 1);
     }
+    let _audio_summary = configure_linphone_audio(core);
 
     let result: Result<(*mut LinphoneAccount, c_int), AppError> = unsafe {
         let auth = linphone_auth_info_new(
