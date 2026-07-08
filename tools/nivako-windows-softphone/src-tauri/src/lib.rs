@@ -1184,23 +1184,42 @@ fn sip_sidecar_call(command: SipSidecarCommand) -> Result<SipSidecarReply, AppEr
         )));
     }
 
-    let mut response = String::new();
-    match client.stdout.read_line(&mut response) {
-        Ok(0) => {
-            let details = sidecar_exit_details(client);
-            *guard = None;
-            Err(AppError::Message(format!(
-                "SIP-Sidecar wurde ohne Antwort beendet ({details})"
-            )))
-        }
-        Ok(_) => serde_json::from_str::<SipSidecarReply>(&response).map_err(|error| {
-            AppError::Message(format!("SIP-Sidecar Antwort ist unlesbar: {error}"))
-        }),
-        Err(error) => {
-            *guard = None;
-            Err(AppError::Message(format!(
-                "SIP-Sidecar Antwort fehlgeschlagen: {error}"
-            )))
+    let mut ignored_output = Vec::new();
+    loop {
+        let mut response = String::new();
+        match client.stdout.read_line(&mut response) {
+            Ok(0) => {
+                let details = sidecar_exit_details(client);
+                *guard = None;
+                let ignored = if ignored_output.is_empty() {
+                    String::new()
+                } else {
+                    format!("; stdout: {}", ignored_output.join(" | "))
+                };
+                return Err(AppError::Message(format!(
+                    "SIP-Sidecar wurde ohne Antwort beendet ({details}{ignored})"
+                )));
+            }
+            Ok(_) => {
+                let trimmed = response.trim();
+                if trimmed.starts_with('{') {
+                    return serde_json::from_str::<SipSidecarReply>(trimmed).map_err(|error| {
+                        AppError::Message(format!("SIP-Sidecar Antwort ist unlesbar: {error}"))
+                    });
+                }
+                if !trimmed.is_empty() {
+                    ignored_output.push(trimmed.to_string());
+                    if ignored_output.len() > 5 {
+                        ignored_output.remove(0);
+                    }
+                }
+            }
+            Err(error) => {
+                *guard = None;
+                return Err(AppError::Message(format!(
+                    "SIP-Sidecar Antwort fehlgeschlagen: {error}"
+                )));
+            }
         }
     }
 }
