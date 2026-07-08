@@ -97,16 +97,11 @@ extern "C" {
         proxy_config: *mut LinphoneProxyConfig,
         server_address: *const c_char,
     ) -> c_int;
-    fn linphone_proxy_config_edit(proxy_config: *mut LinphoneProxyConfig);
     fn linphone_proxy_config_enable_register(
         proxy_config: *mut LinphoneProxyConfig,
         enable: bool_t,
     );
-    fn linphone_proxy_config_set_expires(
-        proxy_config: *mut LinphoneProxyConfig,
-        expires: c_int,
-    );
-    fn linphone_proxy_config_done(proxy_config: *mut LinphoneProxyConfig) -> c_int;
+    fn linphone_proxy_config_set_expires(proxy_config: *mut LinphoneProxyConfig, expires: c_int);
     fn linphone_core_add_proxy_config(
         core: *mut LinphoneCore,
         config: *mut LinphoneProxyConfig,
@@ -560,8 +555,13 @@ fn sip_register_udp(
     auth_candidates.sort();
     auth_candidates.dedup();
     for (index, auth_username) in auth_candidates.into_iter().enumerate() {
-        let authorization =
-            sip_digest_authorization(&auth_username, &auth_username, password, &domain, &challenge)?;
+        let authorization = sip_digest_authorization(
+            &auth_username,
+            &auth_username,
+            password,
+            &domain,
+            &challenge,
+        )?;
         let branch = sip_token("z9hG4bK");
         let second = sip_register_message(
             &domain,
@@ -628,7 +628,8 @@ fn call_state(core: *mut LinphoneCore) -> String {
         "active".to_string()
     } else if lower.contains("paused") || lower.contains("pausing") {
         "held".to_string()
-    } else if lower.contains("incoming") || lower.contains("outgoing") || lower.contains("ringing") {
+    } else if lower.contains("incoming") || lower.contains("outgoing") || lower.contains("ringing")
+    {
         "ringing".to_string()
     } else if lower.contains("end") || lower.contains("released") || lower.contains("error") {
         "idle".to_string()
@@ -965,7 +966,9 @@ fn sip_register_linphone(
         )
     };
     if core.is_null() {
-        return Err(AppError::Message("liblinphone Core konnte nicht erstellt werden".to_string()));
+        return Err(AppError::Message(
+            "liblinphone Core konnte nicht erstellt werden".to_string(),
+        ));
     }
     unsafe {
         let transports = LinphoneSipTransports {
@@ -991,7 +994,9 @@ fn sip_register_linphone(
         );
         if auth.is_null() {
             linphone_core_unref(core);
-            return Err(AppError::Message("SIP-Auth konnte nicht erstellt werden".to_string()));
+            return Err(AppError::Message(
+                "SIP-Auth konnte nicht erstellt werden".to_string(),
+            ));
         }
         linphone_core_add_auth_info(core, auth);
         linphone_auth_info_unref(auth);
@@ -999,22 +1004,24 @@ fn sip_register_linphone(
         let proxy = linphone_core_create_proxy_config(core);
         if proxy.is_null() {
             linphone_core_unref(core);
-            return Err(AppError::Message("SIP-Proxy konnte nicht erstellt werden".to_string()));
+            return Err(AppError::Message(
+                "SIP-Proxy konnte nicht erstellt werden".to_string(),
+            ));
         }
 
         let address = linphone_address_new(c_identity.as_ptr());
         if address.is_null() {
             linphone_core_unref(core);
-            return Err(AppError::Message(format!("Ungueltige SIP-Identitaet: {identity}")));
+            return Err(AppError::Message(format!(
+                "Ungueltige SIP-Identitaet: {identity}"
+            )));
         }
 
-        linphone_proxy_config_edit(proxy);
         let identity_status = linphone_proxy_config_set_identity_address(proxy, address);
         linphone_address_unref(address);
         let server_status = linphone_proxy_config_set_server_addr(proxy, c_server.as_ptr());
         linphone_proxy_config_set_expires(proxy, 600);
         linphone_proxy_config_enable_register(proxy, 1);
-        let done_status = linphone_proxy_config_done(proxy);
         let add_status = linphone_core_add_proxy_config(core, proxy);
         linphone_core_set_default_proxy_config(core, proxy);
         let start_status = linphone_core_start(core);
@@ -1025,10 +1032,10 @@ fn sip_register_linphone(
         linphone_core_refresh_registers(core);
         linphone_core_ensure_registered(core);
 
-        if identity_status != 0 || server_status != 0 || done_status != 0 || add_status != 0 {
+        if identity_status != 0 || server_status != 0 || add_status != 0 || start_status != 0 {
             linphone_core_unref(core);
             return Err(AppError::Message(format!(
-                "SIP-Konfiguration wurde von liblinphone abgelehnt (identity={identity_status}, server={server_status}, done={done_status}, add={add_status}, start={start_status})"
+                "SIP-Konfiguration wurde von liblinphone abgelehnt (identity={identity_status}, server={server_status}, add={add_status}, start={start_status})"
             )));
         }
 
@@ -1056,7 +1063,9 @@ fn sip_register_linphone(
     let snapshot = refresh_sip_snapshot_from_session(format!(
         "SIP-Registrierung geprueft: {display_name} / {sip_extension}@{domain}."
     ))
-    .ok_or_else(|| AppError::Message("SIP-Sitzung wurde nach Registrierung nicht erstellt".to_string()))?;
+    .ok_or_else(|| {
+        AppError::Message("SIP-Sitzung wurde nach Registrierung nicht erstellt".to_string())
+    })?;
 
     Ok(NativeSipStatus {
         registered: snapshot.registered,
@@ -1066,7 +1075,9 @@ fn sip_register_linphone(
 
 fn start_sip_sidecar() -> Result<SipSidecarClient, AppError> {
     let executable = std::env::current_exe().map_err(|error| {
-        AppError::Message(format!("SIP-Sidecar konnte App-Pfad nicht ermitteln: {error}"))
+        AppError::Message(format!(
+            "SIP-Sidecar konnte App-Pfad nicht ermitteln: {error}"
+        ))
     })?;
     let mut child = Command::new(executable)
         .arg("--nivako-sip-sidecar")
@@ -1111,7 +1122,9 @@ fn sip_sidecar_call(command: SipSidecarCommand) -> Result<SipSidecarReply, AppEr
         .as_mut()
         .ok_or_else(|| AppError::Message("SIP-Sidecar ist nicht aktiv".to_string()))?;
     let request = serde_json::to_string(&command).map_err(|error| {
-        AppError::Message(format!("SIP-Sidecar Kommando konnte nicht serialisiert werden: {error}"))
+        AppError::Message(format!(
+            "SIP-Sidecar Kommando konnte nicht serialisiert werden: {error}"
+        ))
     })?;
     if let Err(error) = writeln!(client.stdin, "{request}").and_then(|_| client.stdin.flush()) {
         *guard = None;
@@ -1342,7 +1355,7 @@ fn sip_register(
                 .map(|status| status.message)
                 .unwrap_or_else(|error| format!("UDP-Diagnose ebenfalls fehlgeschlagen: {error}"));
                 let message = format!(
-                    "Nativer SIP-Core konnte nicht starten oder registrieren: {message}. {diagnostic}"
+                    "REGISTER-Diagnose: {diagnostic} Nativer Call-Core nicht aktiv: {message}"
                 );
                 set_sip_snapshot(NativeSipSnapshot {
                     registered: false,
@@ -1384,7 +1397,9 @@ fn sip_register(
                 });
                 Ok(NativeSipStatus {
                     registered: false,
-                    message,
+                    message: format!(
+                        "REGISTER-Diagnose: {diagnostic} Nativer Call-Core nicht aktiv: {error}"
+                    ),
                 })
             }
         };
@@ -1526,7 +1541,10 @@ fn sip_dial(
         }
         let snapshot = session_snapshot(
             session,
-            format!("Nativer Anruf gestartet: {} -> {number}.", session.sip_extension),
+            format!(
+                "Nativer Anruf gestartet: {} -> {number}.",
+                session.sip_extension
+            ),
         );
         set_sip_snapshot(snapshot.clone());
         Ok(NativeSipStatus {
@@ -1714,7 +1732,10 @@ mod tests {
 
         assert_eq!(challenge.get("realm").map(String::as_str), Some("asterisk"));
         assert_eq!(challenge.get("nonce").map(String::as_str), Some("abc123"));
-        assert_eq!(challenge.get("qop").map(String::as_str), Some("auth,auth-int"));
+        assert_eq!(
+            challenge.get("qop").map(String::as_str),
+            Some("auth,auth-int")
+        );
         assert_eq!(challenge.get("algorithm").map(String::as_str), Some("MD5"));
     }
 
