@@ -49,6 +49,7 @@ type LinphoneAuthInfo = c_void;
 type LinphoneProxyConfig = c_void;
 type LinphoneAccount = c_void;
 type LinphoneAccountParams = c_void;
+type LinphoneCallParams = c_void;
 type LinphonePayloadType = c_void;
 type LinphoneFactory = c_void;
 type MSFactory = c_void;
@@ -170,6 +171,20 @@ extern "C" {
         core: *mut LinphoneCore,
         address: *const LinphoneAddress,
     ) -> *mut LinphoneCall;
+    fn linphone_core_create_call_params(
+        core: *mut LinphoneCore,
+        call: *const LinphoneCall,
+    ) -> *mut LinphoneCallParams;
+    fn linphone_call_params_set_account(
+        params: *mut LinphoneCallParams,
+        account: *mut LinphoneAccount,
+    );
+    fn linphone_core_invite_address_with_params(
+        core: *mut LinphoneCore,
+        address: *const LinphoneAddress,
+        params: *const LinphoneCallParams,
+    ) -> *mut LinphoneCall;
+    fn linphone_call_params_unref(params: *mut LinphoneCallParams);
     fn linphone_core_get_current_call(core: *const LinphoneCore) -> *mut LinphoneCall;
     fn linphone_call_get_state(call: *const LinphoneCall) -> c_int;
     fn linphone_call_state_to_string(state: c_int) -> *const c_char;
@@ -1944,28 +1959,42 @@ fn sip_dial(
         if address.is_null() {
             return Err(AppError::Message(format!("Ungueltiges SIP-Ziel: {target}")));
         }
+        let mut dial_path = "core-invite".to_string();
         let call = unsafe {
-            let call = linphone_core_invite_address(session.core, address);
+            let params = if session.account.is_null() {
+                ptr::null_mut()
+            } else {
+                linphone_core_create_call_params(session.core, ptr::null())
+            };
+            let call = if params.is_null() {
+                linphone_core_invite_address(session.core, address)
+            } else {
+                linphone_call_params_set_account(params, session.account);
+                dial_path = "account-call-params".to_string();
+                let call = linphone_core_invite_address_with_params(session.core, address, params);
+                linphone_call_params_unref(params);
+                call
+            };
             linphone_address_unref(address);
             call
         };
         tick_core_for(session.core, 20, 100);
         if call.is_null() {
             return Err(AppError::Message(format!(
-                "Anruf konnte nicht gestartet werden. Ziel={target}. SIP-Status: {state_label}. {}",
+                "Anruf konnte nicht gestartet werden. Ziel={target}. Dial-Pfad={dial_path}. SIP-Status: {state_label}. {}",
                 session.audio_profile
             )));
         }
         let snapshot = session_snapshot(
             session,
             format!(
-                "Nativer Anruf gestartet: {} -> {number}. Ziel={target}.",
+                "Nativer Anruf gestartet: {} -> {number}. Ziel={target}. Dial-Pfad={dial_path}.",
                 session.sip_extension
             ),
         );
         if !snapshot.registered || snapshot.call_state == "idle" {
             return Err(AppError::Message(format!(
-                "Anruf wurde von liblinphone nicht aktiv gestartet. Ziel={target}. Call-State={}. {}",
+                "Anruf wurde von liblinphone nicht aktiv gestartet. Ziel={target}. Dial-Pfad={dial_path}. Call-State={}. {}",
                 snapshot.call_state,
                 snapshot.message
             )));
