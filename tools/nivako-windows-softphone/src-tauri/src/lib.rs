@@ -1950,6 +1950,8 @@ fn sip_dial(
         let domain = normalize_domain(&sip_server);
         let target = if number.starts_with("sip:") || number.starts_with("sips:") {
             number.clone()
+        } else if !session.account.is_null() {
+            format!("sip:{}@{}", number.trim(), domain)
         } else {
             let transport = sip_transport_param(&sip_server).unwrap_or_default();
             format!("sip:{}@{}{}", number.trim(), domain, transport)
@@ -1970,7 +1972,7 @@ fn sip_dial(
                 linphone_core_invite_address(session.core, address)
             } else {
                 linphone_call_params_set_account(params, session.account);
-                dial_path = "account-call-params".to_string();
+                dial_path = "account-call-params-no-target-transport".to_string();
                 let call = linphone_core_invite_address_with_params(session.core, address, params);
                 linphone_call_params_unref(params);
                 call
