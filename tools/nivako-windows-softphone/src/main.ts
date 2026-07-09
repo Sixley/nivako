@@ -12,8 +12,8 @@ import type { CallEntry, Contact, NativeSipSnapshot, Settings, SoftphoneState } 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.2.18";
-const buildLabel = "0.2.18 Incoming Call Diagnostics";
+const appVersion = "0.2.19";
+const buildLabel = "0.2.19 Known-good Dial Restore";
 const cardDavRefreshMs = 15 * 60 * 1000;
 const sipReconnectMs = 60 * 1000;
 const sipStatusPollMs = 2000;
