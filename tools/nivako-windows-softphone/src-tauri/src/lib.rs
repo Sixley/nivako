@@ -814,19 +814,6 @@ fn call_state(core: *mut LinphoneCore) -> String {
     }
 }
 
-fn raw_call_state(call: *const LinphoneCall) -> String {
-    if call.is_null() {
-        return "none".to_string();
-    }
-    let state = unsafe { linphone_call_get_state(call) };
-    let label = c_string_or_empty(unsafe { linphone_call_state_to_string(state) });
-    if label.is_empty() {
-        format!("state={state}")
-    } else {
-        format!("{label} ({state})")
-    }
-}
-
 fn linphone_audio_summary(core: *mut LinphoneCore) -> String {
     let playback = c_string_or_empty(unsafe { linphone_core_get_playback_device(core) });
     let capture = c_string_or_empty(unsafe { linphone_core_get_capture_device(core) });
@@ -997,9 +984,8 @@ fn session_snapshot(session: &LinphoneSession, message: String) -> NativeSipSnap
         call_state: call_state(session.core),
         provider: "liblinphone".to_string(),
         message: format!(
-            "{message} SIP-Status: {registration_label}. {}. {}",
-            session.audio_profile,
-            linphone_audio_summary(session.core)
+            "{message} SIP-Status: {registration_label}. {}",
+            session.audio_profile
         ),
         held: session.held,
         muted: session.muted,
@@ -1967,20 +1953,20 @@ fn sip_dial(
         if call.is_null() {
             return Err(AppError::Message(format!(
                 "Anruf konnte nicht gestartet werden. Ziel={target}. SIP-Status: {state_label}. {}",
-                linphone_audio_summary(session.core)
+                session.audio_profile
             )));
         }
-        let raw_state = raw_call_state(call);
         let snapshot = session_snapshot(
             session,
             format!(
-                "Nativer Anruf gestartet: {} -> {number}. Ziel={target}. Call-State={raw_state}.",
+                "Nativer Anruf gestartet: {} -> {number}. Ziel={target}.",
                 session.sip_extension
             ),
         );
         if !snapshot.registered || snapshot.call_state == "idle" {
             return Err(AppError::Message(format!(
-                "Anruf wurde von liblinphone nicht aktiv gestartet. Ziel={target}. Call-State={raw_state}. {}",
+                "Anruf wurde von liblinphone nicht aktiv gestartet. Ziel={target}. Call-State={}. {}",
+                snapshot.call_state,
                 snapshot.message
             )));
         }
