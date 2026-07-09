@@ -13,7 +13,7 @@ const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
 const appVersion = "0.2.20";
-const buildLabel = "0.2.20 Audio SDP Fix";
+const buildLabel = "0.2.20 PBX 488 Audio SDP Fix";
 const cardDavRefreshMs = 15 * 60 * 1000;
 const sipReconnectMs = 60 * 1000;
 const sipStatusPollMs = 2000;
