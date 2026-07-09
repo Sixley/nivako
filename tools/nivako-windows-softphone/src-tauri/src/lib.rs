@@ -2041,8 +2041,6 @@ fn sip_dial(
         let domain = normalize_domain(&sip_server);
         let target = if number.starts_with("sip:") || number.starts_with("sips:") {
             number.clone()
-        } else if !session.account.is_null() {
-            format!("sip:{}@{}", number.trim(), domain)
         } else {
             let transport = sip_transport_param(&sip_server).unwrap_or_default();
             format!("sip:{}@{}{}", number.trim(), domain, transport)
@@ -2052,46 +2050,25 @@ fn sip_dial(
         if address.is_null() {
             return Err(AppError::Message(format!("Ungueltiges SIP-Ziel: {target}")));
         }
-        let mut dial_path = "core-invite".to_string();
         let call = unsafe {
-            let params = if session.account.is_null() {
-                ptr::null_mut()
-            } else {
-                linphone_core_create_call_params(session.core, ptr::null())
-            };
-            let call = if params.is_null() {
-                linphone_core_invite_address(session.core, address)
-            } else {
-                linphone_call_params_set_account(params, session.account);
-                dial_path = "account-call-params-no-target-transport".to_string();
-                let call = linphone_core_invite_address_with_params(session.core, address, params);
-                linphone_call_params_unref(params);
-                call
-            };
+            let call = linphone_core_invite_address(session.core, address);
             linphone_address_unref(address);
             call
         };
-        tick_core_for(session.core, 20, 100);
+        tick_core_for(session.core, 10, 100);
         if call.is_null() {
             return Err(AppError::Message(format!(
-                "Anruf konnte nicht gestartet werden. Ziel={target}. Dial-Pfad={dial_path}. SIP-Status: {state_label}. {}",
+                "Anruf konnte nicht gestartet werden. Ziel={target}. Dial-Pfad=direct-core-invite-restore. SIP-Status: {state_label}. {}",
                 session.audio_profile
             )));
         }
         let snapshot = session_snapshot(
             session,
             format!(
-                "Nativer Anruf gestartet: {} -> {number}. Ziel={target}. Dial-Pfad={dial_path}.",
+                "Nativer Anruf gestartet: {} -> {number}. Ziel={target}. Dial-Pfad=direct-core-invite-restore.",
                 session.sip_extension
             ),
         );
-        if !snapshot.registered || snapshot.call_state == "idle" {
-            return Err(AppError::Message(format!(
-                "Anruf wurde von liblinphone nicht aktiv gestartet. Ziel={target}. Dial-Pfad={dial_path}. Call-State={}. {}",
-                snapshot.call_state,
-                snapshot.message
-            )));
-        }
         set_sip_snapshot(snapshot.clone());
         Ok(NativeSipStatus {
             registered: snapshot.registered,
