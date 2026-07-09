@@ -12,8 +12,8 @@ import type { CallEntry, Contact, NativeSipSnapshot, Settings, SoftphoneState } 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.2.17";
-const buildLabel = "0.2.17 Clean Account Target";
+const appVersion = "0.2.18";
+const buildLabel = "0.2.18 Incoming Call Diagnostics";
 const cardDavRefreshMs = 15 * 60 * 1000;
 const sipReconnectMs = 60 * 1000;
 const sipStatusPollMs = 2000;
@@ -338,6 +338,20 @@ function addHistory(direction: CallEntry["direction"], number: string, name = nu
 
 async function dial(): Promise<void> {
   if (!state.activeNumber) return;
+  if (state.callState === "ringing" && telephony.accept) {
+    state = { ...state, callState: "active" };
+    notice = "Eingehender Anruf wird angenommen.";
+    render();
+    try {
+      await telephony.accept();
+      addHistory("inbound", state.activeNumber || "eingehend", state.activeContact?.displayName || state.activeNumber || "Eingehender Anruf", "started");
+    } catch (error) {
+      notice = errorMessage(error, "Anruf konnte nicht angenommen werden");
+      state = { ...state, callState: "idle" };
+    }
+    render();
+    return;
+  }
   const realSipTelephony = settings.enableWebRtcSip || canUseNativeTelephony();
   if (settings.safeCallMode) {
     notice = "Anrufschutz aktiv: Es wurde kein echter Anruf gestartet.";
@@ -744,7 +758,7 @@ function render(): void {
           </div>
           <div class="call-actions">
             <button class="secondary" id="register-sip" ${settings.enableWebRtcSip || canUseNativeTelephony() ? "" : "disabled"}>Registrieren</button>
-            <button class="primary" id="dial" ${!state.activeNumber ? "disabled" : ""}>${settings.safeCallMode ? "Lokal erfassen" : "Anrufen"}</button>
+            <button class="primary" id="dial" ${!state.activeNumber && state.callState !== "ringing" ? "disabled" : ""}>${state.callState === "ringing" ? "Annehmen" : settings.safeCallMode ? "Lokal erfassen" : "Anrufen"}</button>
             <button class="danger" id="hangup" ${state.callState === "idle" ? "disabled" : ""}>Auflegen</button>
           </div>
           <div class="call-actions compact-actions">
