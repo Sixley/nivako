@@ -50,6 +50,8 @@ type LinphoneProxyConfig = c_void;
 type LinphoneAccount = c_void;
 type LinphoneAccountParams = c_void;
 type LinphonePayloadType = c_void;
+type LinphoneFactory = c_void;
+type MSFactory = c_void;
 
 #[repr(C)]
 struct BctbxList {
@@ -72,6 +74,8 @@ struct LinphoneSipTransports {
 #[cfg_attr(target_os = "windows", link(name = "liblinphone"))]
 #[cfg_attr(not(target_os = "windows"), link(name = "linphone"))]
 extern "C" {
+    fn linphone_factory_get() -> *mut LinphoneFactory;
+    fn linphone_factory_set_msplugins_dir(factory: *mut LinphoneFactory, path: *const c_char);
     fn linphone_core_new(
         vtable: *const c_void,
         config_path: *const c_char,
@@ -81,6 +85,7 @@ extern "C" {
     fn linphone_core_start(core: *mut LinphoneCore) -> c_int;
     fn linphone_core_iterate(core: *mut LinphoneCore);
     fn linphone_core_unref(core: *mut LinphoneCore);
+    fn linphone_core_get_ms_factory(core: *mut LinphoneCore) -> *mut MSFactory;
     fn linphone_core_set_network_reachable(core: *mut LinphoneCore, reachable: bool_t);
     fn linphone_core_set_sip_network_reachable(core: *mut LinphoneCore, reachable: bool_t);
     fn linphone_core_set_media_network_reachable(core: *mut LinphoneCore, reachable: bool_t);
@@ -173,6 +178,9 @@ extern "C" {
     fn linphone_core_resume_call(core: *mut LinphoneCore, call: *mut LinphoneCall) -> c_int;
     fn linphone_core_enable_mic(core: *mut LinphoneCore, enable: bool_t);
     fn linphone_call_send_dtmf(call: *mut LinphoneCall, dtmf: c_char) -> c_int;
+    fn ms_factory_set_plugins_dir(factory: *mut MSFactory, path: *const c_char);
+    fn ms_factory_load_plugins(factory: *mut MSFactory, directory: *const c_char) -> c_int;
+    fn ms_factory_init_plugins(factory: *mut MSFactory);
 }
 
 struct LinphoneSession {
@@ -283,6 +291,97 @@ fn c_string_or_empty(ptr: *const c_char) -> String {
         return String::new();
     }
     unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
+}
+
+fn linphone_plugin_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("NIVAKO_LINPHONE_PLUGIN_DIR").map(PathBuf::from) {
+        if dir.exists() {
+            return Some(dir);
+        }
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let candidates = [
+                exe_dir.join("lib").join("mediastreamer").join("plugins"),
+                exe_dir.join("mediastreamer").join("plugins"),
+            ];
+            if let Some(dir) = candidates.into_iter().find(|candidate| candidate.exists()) {
+                return Some(dir);
+            }
+        }
+    }
+
+    if let Some(sdk_dir) = std::env::var_os("LINPHONE_SDK_DIR").map(PathBuf::from) {
+        let candidates = [
+            sdk_dir
+                .join("win64")
+                .join("lib")
+                .join("mediastreamer")
+                .join("plugins"),
+            sdk_dir.join("lib").join("mediastreamer").join("plugins"),
+        ];
+        if let Some(dir) = candidates.into_iter().find(|candidate| candidate.exists()) {
+            return Some(dir);
+        }
+    }
+
+    None
+}
+
+fn configure_linphone_plugin_dir() -> String {
+    let Some(plugin_dir) = linphone_plugin_dir() else {
+        return "Plugins: kein Mediastreamer-Pluginpfad gefunden".to_string();
+    };
+    let plugin_dir_text = plugin_dir.to_string_lossy().into_owned();
+    let plugin_count = fs::read_dir(&plugin_dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| {
+                    entry
+                        .path()
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("dll"))
+                })
+                .count()
+        })
+        .unwrap_or(0);
+
+    if let Ok(c_plugin_dir) = cstring(&plugin_dir_text, "Mediastreamer-Pluginpfad") {
+        unsafe {
+            let factory = linphone_factory_get();
+            if !factory.is_null() {
+                linphone_factory_set_msplugins_dir(factory, c_plugin_dir.as_ptr());
+            }
+        }
+    }
+
+    format!("Plugins: dir={plugin_dir_text}, dlls={plugin_count}")
+}
+
+fn load_linphone_media_plugins(core: *mut LinphoneCore) -> String {
+    let Some(plugin_dir) = linphone_plugin_dir() else {
+        return "Plugins: keine Runtime-Plugins ladbar".to_string();
+    };
+    let plugin_dir_text = plugin_dir.to_string_lossy().into_owned();
+    let Ok(c_plugin_dir) = cstring(&plugin_dir_text, "Mediastreamer-Pluginpfad") else {
+        return format!("Plugins: ungueltiger Pfad {plugin_dir_text}");
+    };
+
+    let loaded = unsafe {
+        let factory = linphone_core_get_ms_factory(core);
+        if factory.is_null() {
+            -1
+        } else {
+            ms_factory_set_plugins_dir(factory, c_plugin_dir.as_ptr());
+            ms_factory_init_plugins(factory);
+            ms_factory_load_plugins(factory, c_plugin_dir.as_ptr())
+        }
+    };
+
+    format!("Plugins: loaded={loaded}, dir={plugin_dir_text}")
 }
 
 fn is_sip_sidecar_process() -> bool {
@@ -1177,6 +1276,7 @@ fn sip_register_linphone(
     let c_identity = cstring(&identity, "SIP-Identitaet")?;
     let c_server = cstring(&server_addr, "SIP-Server")?;
     let config_path = linphone_config_path()?;
+    let plugin_config = configure_linphone_plugin_dir();
 
     let core = unsafe {
         linphone_core_new(
@@ -1191,6 +1291,7 @@ fn sip_register_linphone(
             "liblinphone Core konnte nicht erstellt werden".to_string(),
         ));
     }
+    let plugin_load = load_linphone_media_plugins(core);
     unsafe {
         let transports = LinphoneSipTransports {
             udp_port: -1,
@@ -1203,7 +1304,12 @@ fn sip_register_linphone(
         linphone_core_set_sip_network_reachable(core, 1);
         linphone_core_set_media_network_reachable(core, 1);
     }
-    let audio_profile = configure_linphone_audio(core);
+    let audio_profile = format!(
+        "{}. {}. {}",
+        plugin_config,
+        plugin_load,
+        configure_linphone_audio(core)
+    );
 
     let result: Result<(*mut LinphoneAccount, c_int), AppError> = unsafe {
         let auth = linphone_auth_info_new(
