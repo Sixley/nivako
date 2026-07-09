@@ -49,6 +49,14 @@ type LinphoneAuthInfo = c_void;
 type LinphoneProxyConfig = c_void;
 type LinphoneAccount = c_void;
 type LinphoneAccountParams = c_void;
+type LinphonePayloadType = c_void;
+
+#[repr(C)]
+struct BctbxList {
+    next: *mut BctbxList,
+    prev: *mut BctbxList,
+    data: *mut c_void,
+}
 
 #[allow(non_camel_case_types)]
 type bool_t = c_int;
@@ -91,11 +99,28 @@ extern "C" {
     fn linphone_core_set_playback_device(core: *mut LinphoneCore, device: *const c_char) -> c_int;
     fn linphone_core_set_capture_device(core: *mut LinphoneCore, device: *const c_char) -> c_int;
     fn linphone_core_set_ringer_device(core: *mut LinphoneCore, device: *const c_char) -> c_int;
-    fn linphone_core_set_media_device(core: *mut LinphoneCore, device: *const c_char) -> c_int;
     fn linphone_core_set_play_level(core: *mut LinphoneCore, level: c_int);
     fn linphone_core_set_rec_level(core: *mut LinphoneCore, level: c_int);
     fn linphone_core_set_mic_gain_db(core: *mut LinphoneCore, level: c_float);
     fn linphone_core_set_playback_gain_db(core: *mut LinphoneCore, level: c_float);
+    fn linphone_core_set_download_bandwidth(core: *mut LinphoneCore, bandwidth: c_int);
+    fn linphone_core_set_upload_bandwidth(core: *mut LinphoneCore, bandwidth: c_int);
+    fn linphone_core_enable_adaptive_rate_control(core: *mut LinphoneCore, enabled: bool_t);
+    fn linphone_core_set_audio_jittcomp(core: *mut LinphoneCore, milliseconds: c_int);
+    fn linphone_core_set_audio_port(core: *mut LinphoneCore, port: c_int);
+    fn linphone_core_get_audio_payload_types(core: *mut LinphoneCore) -> *mut BctbxList;
+    fn linphone_payload_type_enable(
+        payload_type: *mut LinphonePayloadType,
+        enabled: bool_t,
+    ) -> c_int;
+    fn linphone_payload_type_enabled(payload_type: *const LinphonePayloadType) -> bool_t;
+    fn linphone_payload_type_get_mime_type(
+        payload_type: *const LinphonePayloadType,
+    ) -> *const c_char;
+    fn linphone_payload_type_get_clock_rate(payload_type: *const LinphonePayloadType) -> c_int;
+    fn linphone_payload_type_get_channels(payload_type: *const LinphonePayloadType) -> c_int;
+    fn linphone_payload_type_get_number(payload_type: *const LinphonePayloadType) -> c_int;
+    fn linphone_core_set_media_encryption(core: *mut LinphoneCore, encryption: c_int) -> c_int;
     fn linphone_core_set_sip_transports(
         core: *mut LinphoneCore,
         transports: *const LinphoneSipTransports,
@@ -156,6 +181,7 @@ struct LinphoneSession {
     account: *mut LinphoneAccount,
     sip_server: String,
     sip_extension: String,
+    audio_profile: String,
     held: bool,
     muted: bool,
 }
@@ -720,13 +746,65 @@ fn linphone_audio_summary(core: *mut LinphoneCore) -> String {
     )
 }
 
+fn configure_linphone_codecs(core: *mut LinphoneCore) -> String {
+    let mut enabled_codecs = Vec::new();
+    let mut supported_codecs = Vec::new();
+    let mut node = unsafe { linphone_core_get_audio_payload_types(core) };
+
+    while !node.is_null() {
+        let payload = unsafe { (*node).data as *mut LinphonePayloadType };
+        if !payload.is_null() {
+            let mime = c_string_or_empty(unsafe { linphone_payload_type_get_mime_type(payload) });
+            let rate = unsafe { linphone_payload_type_get_clock_rate(payload) };
+            let channels = unsafe { linphone_payload_type_get_channels(payload) };
+            let number = unsafe { linphone_payload_type_get_number(payload) };
+            let mime_upper = mime.to_ascii_uppercase();
+            let keep = matches!(mime_upper.as_str(), "PCMA" | "PCMU")
+                && rate == 8000
+                && channels <= 1;
+            let _ = unsafe { linphone_payload_type_enable(payload, if keep { 1 } else { 0 }) };
+
+            let label = format!("{mime}/{rate}/{channels} pt={number}");
+            supported_codecs.push(label.clone());
+            if unsafe { linphone_payload_type_enabled(payload) } != 0 {
+                enabled_codecs.push(label);
+            }
+        }
+        node = unsafe { (*node).next };
+    }
+
+    let enabled = if enabled_codecs.is_empty() {
+        "keine".to_string()
+    } else {
+        enabled_codecs.join(", ")
+    };
+    let supported = if supported_codecs.is_empty() {
+        "keine gefunden".to_string()
+    } else {
+        supported_codecs
+            .iter()
+            .take(8)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    format!("Codecs: enabled=[{enabled}], supported=[{supported}]")
+}
+
 fn configure_linphone_audio(core: *mut LinphoneCore) -> String {
     unsafe {
         linphone_core_enable_mic(core, 1);
-        linphone_core_set_play_level(core, 100);
-        linphone_core_set_rec_level(core, 100);
+        linphone_core_set_play_level(core, 85);
+        linphone_core_set_rec_level(core, 70);
         linphone_core_set_mic_gain_db(core, 0.0);
         linphone_core_set_playback_gain_db(core, 0.0);
+        linphone_core_set_download_bandwidth(core, 64);
+        linphone_core_set_upload_bandwidth(core, 64);
+        linphone_core_enable_adaptive_rate_control(core, 1);
+        linphone_core_set_audio_jittcomp(core, 80);
+        linphone_core_set_audio_port(core, -1);
+        let _ = linphone_core_set_media_encryption(core, 0);
 
         let table = linphone_core_get_sound_devices(core);
         if !table.is_null() {
@@ -749,16 +827,28 @@ fn configure_linphone_audio(core: *mut LinphoneCore) -> String {
                 }
             }
             if !playback_device.is_null() {
-                let _ = linphone_core_set_playback_device(core, playback_device);
-                let _ = linphone_core_set_ringer_device(core, playback_device);
-                let _ = linphone_core_set_media_device(core, playback_device);
+                let current_playback = linphone_core_get_playback_device(core);
+                let current_ringer = linphone_core_get_ringer_device(core);
+                if current_playback.is_null() || c_string_or_empty(current_playback).is_empty() {
+                    let _ = linphone_core_set_playback_device(core, playback_device);
+                }
+                if current_ringer.is_null() || c_string_or_empty(current_ringer).is_empty() {
+                    let _ = linphone_core_set_ringer_device(core, playback_device);
+                }
             }
             if !capture_device.is_null() {
-                let _ = linphone_core_set_capture_device(core, capture_device);
+                let current_capture = linphone_core_get_capture_device(core);
+                if current_capture.is_null() || c_string_or_empty(current_capture).is_empty() {
+                    let _ = linphone_core_set_capture_device(core, capture_device);
+                }
             }
         }
     }
-    linphone_audio_summary(core)
+    format!(
+        "{}. {}",
+        configure_linphone_codecs(core),
+        linphone_audio_summary(core)
+    )
 }
 
 fn set_sip_snapshot(snapshot: NativeSipSnapshot) {
@@ -778,7 +868,8 @@ fn session_snapshot(session: &LinphoneSession, message: String) -> NativeSipSnap
         call_state: call_state(session.core),
         provider: "liblinphone".to_string(),
         message: format!(
-            "{message} SIP-Status: {registration_label}. {}",
+            "{message} SIP-Status: {registration_label}. {}. {}",
+            session.audio_profile,
             linphone_audio_summary(session.core)
         ),
         held: session.held,
@@ -1112,7 +1203,7 @@ fn sip_register_linphone(
         linphone_core_set_sip_network_reachable(core, 1);
         linphone_core_set_media_network_reachable(core, 1);
     }
-    let _audio_summary = configure_linphone_audio(core);
+    let audio_profile = configure_linphone_audio(core);
 
     let result: Result<(*mut LinphoneAccount, c_int), AppError> = unsafe {
         let auth = linphone_auth_info_new(
@@ -1190,6 +1281,7 @@ fn sip_register_linphone(
         account,
         sip_server: sip_server.to_string(),
         sip_extension: sip_extension.to_string(),
+        audio_profile,
         held: false,
         muted: false,
     };

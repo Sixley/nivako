@@ -12,8 +12,8 @@ import type { CallEntry, Contact, NativeSipSnapshot, Settings, SoftphoneState } 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.2.11";
-const buildLabel = "0.2.11 Audio UI Repair";
+const appVersion = "0.2.12";
+const buildLabel = "0.2.12 Scroll Codec Repair";
 const cardDavRefreshMs = 15 * 60 * 1000;
 const sipReconnectMs = 60 * 1000;
 const sipStatusPollMs = 2000;

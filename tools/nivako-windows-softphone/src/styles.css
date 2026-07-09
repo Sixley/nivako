@@ -180,6 +180,7 @@ button:disabled {
 
 .panel-header {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
@@ -257,6 +258,10 @@ h2 small {
   outline: none;
 }
 
+.search {
+  flex: 0 0 auto;
+}
+
 .search:focus,
 .number-input:focus,
 .settings-list input:focus,
@@ -266,21 +271,27 @@ h2 small {
 }
 
 .contact-list {
-  display: grid;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
   align-content: start;
   gap: 10px;
+  height: 100%;
   min-height: 0;
-  flex: 1;
   margin-top: 16px;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding-right: 8px;
+  overscroll-behavior: contain;
 }
 
 .contact-row {
   display: grid;
+  flex: 0 0 auto;
   grid-template-columns: minmax(0, 1fr) 42px;
   align-items: stretch;
   width: 100%;
+  min-height: 66px;
   overflow: hidden;
   border: 1px solid #e2dbd1;
   border-radius: 7px;
@@ -302,6 +313,7 @@ h2 small {
 .contact-select,
 .history-row {
   display: grid;
+  flex: 0 0 auto;
   align-items: center;
   width: 100%;
   border: 0;
@@ -407,6 +419,7 @@ h2 small {
 
 .phone-panel {
   display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
   align-content: start;
   gap: 16px;
   min-width: 0;
@@ -419,7 +432,8 @@ h2 small {
 .call-card,
 .history {
   min-width: 0;
-  overflow: hidden;
+  min-height: 0;
+  overflow: auto;
   border: 1px solid var(--line);
   border-radius: 7px;
   padding: 18px;
