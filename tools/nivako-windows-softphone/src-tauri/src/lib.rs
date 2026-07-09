@@ -411,6 +411,24 @@ fn normalize_domain(sip_server: &str) -> String {
         .to_string()
 }
 
+fn sip_transport_param(sip_server: &str) -> Option<String> {
+    sip_server
+        .split(';')
+        .filter_map(|part| part.split_once('='))
+        .find_map(|(key, value)| {
+            if key.trim().eq_ignore_ascii_case("transport") {
+                let transport = value.trim();
+                if transport.is_empty() {
+                    None
+                } else {
+                    Some(format!(";transport={transport}"))
+                }
+            } else {
+                None
+            }
+        })
+}
+
 fn sip_host_port(sip_server: &str) -> Result<(String, u16), AppError> {
     let server = sip_server
         .trim()
@@ -796,6 +814,19 @@ fn call_state(core: *mut LinphoneCore) -> String {
     }
 }
 
+fn raw_call_state(call: *const LinphoneCall) -> String {
+    if call.is_null() {
+        return "none".to_string();
+    }
+    let state = unsafe { linphone_call_get_state(call) };
+    let label = c_string_or_empty(unsafe { linphone_call_state_to_string(state) });
+    if label.is_empty() {
+        format!("state={state}")
+    } else {
+        format!("{label} ({state})")
+    }
+}
+
 fn linphone_audio_summary(core: *mut LinphoneCore) -> String {
     let playback = c_string_or_empty(unsafe { linphone_core_get_playback_device(core) });
     let capture = c_string_or_empty(unsafe { linphone_core_get_capture_device(core) });
@@ -858,9 +889,8 @@ fn configure_linphone_codecs(core: *mut LinphoneCore) -> String {
             let channels = unsafe { linphone_payload_type_get_channels(payload) };
             let number = unsafe { linphone_payload_type_get_number(payload) };
             let mime_upper = mime.to_ascii_uppercase();
-            let keep = matches!(mime_upper.as_str(), "PCMA" | "PCMU")
-                && rate == 8000
-                && channels <= 1;
+            let keep =
+                matches!(mime_upper.as_str(), "PCMA" | "PCMU") && rate == 8000 && channels <= 1;
             let _ = unsafe { linphone_payload_type_enable(payload, if keep { 1 } else { 0 }) };
 
             let label = format!("{mime}/{rate}/{channels} pt={number}");
@@ -1920,7 +1950,8 @@ fn sip_dial(
         let target = if number.starts_with("sip:") || number.starts_with("sips:") {
             number.clone()
         } else {
-            format!("sip:{}@{}", number.trim(), domain)
+            let transport = sip_transport_param(&sip_server).unwrap_or_default();
+            format!("sip:{}@{}{}", number.trim(), domain, transport)
         };
         let c_target = cstring(&target, "Zielnummer")?;
         let address = unsafe { linphone_address_new(c_target.as_ptr()) };
@@ -1935,19 +1966,21 @@ fn sip_dial(
         tick_core_for(session.core, 20, 100);
         if call.is_null() {
             return Err(AppError::Message(format!(
-                "Anruf konnte nicht gestartet werden. SIP-Status: {state_label}"
+                "Anruf konnte nicht gestartet werden. Ziel={target}. SIP-Status: {state_label}. {}",
+                linphone_audio_summary(session.core)
             )));
         }
+        let raw_state = raw_call_state(call);
         let snapshot = session_snapshot(
             session,
             format!(
-                "Nativer Anruf gestartet: {} -> {number}.",
+                "Nativer Anruf gestartet: {} -> {number}. Ziel={target}. Call-State={raw_state}.",
                 session.sip_extension
             ),
         );
         if !snapshot.registered || snapshot.call_state == "idle" {
             return Err(AppError::Message(format!(
-                "Anruf wurde von liblinphone nicht aktiv gestartet. {}",
+                "Anruf wurde von liblinphone nicht aktiv gestartet. Ziel={target}. Call-State={raw_state}. {}",
                 snapshot.message
             )));
         }

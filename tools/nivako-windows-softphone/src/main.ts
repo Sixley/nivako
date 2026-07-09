@@ -12,8 +12,8 @@ import type { CallEntry, Contact, NativeSipSnapshot, Settings, SoftphoneState } 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.2.13";
-const buildLabel = "0.2.13 Windows Audio Plugin Repair";
+const appVersion = "0.2.14";
+const buildLabel = "0.2.14 Windows Audio and Dial Repair";
 const cardDavRefreshMs = 15 * 60 * 1000;
 const sipReconnectMs = 60 * 1000;
 const sipStatusPollMs = 2000;
@@ -354,6 +354,8 @@ async function dial(): Promise<void> {
   }
 
   state = { ...state, callState: "dialing" };
+  notice = `Anruf wird gestartet: ${state.activeNumber}`;
+  render();
   try {
     await telephony.dial(state.activeNumber);
     addHistory("outbound", state.activeNumber, state.activeContact?.displayName || state.activeNumber, "started");

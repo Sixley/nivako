@@ -41,6 +41,8 @@ fn main() {
                 }
             }
         }
+
+        println!("cargo:rustc-link-lib=mediastreamer2");
     } else {
         let runtime_dir = std::path::Path::new("linphone-runtime");
         let _ = std::fs::create_dir_all(runtime_dir);
