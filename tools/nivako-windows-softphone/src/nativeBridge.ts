@@ -90,6 +90,10 @@ export async function dialNative(number: string, settings: Settings): Promise<Na
   }, nativeSipTimeoutMs, "Nativer SIP-Anruf antwortet nicht innerhalb von 15 Sekunden.");
 }
 
+export async function acceptNative(): Promise<NativeSipStatus> {
+  return tauriInvokeWithTimeout<NativeSipStatus>("sip_accept", undefined, nativeSipTimeoutMs, "Annehmen antwortet nicht innerhalb von 15 Sekunden.");
+}
+
 export async function hangupNative(): Promise<NativeSipStatus> {
   return tauriInvokeWithTimeout<NativeSipStatus>("sip_hangup", undefined, nativeSipTimeoutMs, "Auflegen antwortet nicht innerhalb von 15 Sekunden.");
 }
