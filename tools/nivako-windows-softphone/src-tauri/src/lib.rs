@@ -107,6 +107,7 @@ extern "C" {
     fn linphone_core_set_playback_device(core: *mut LinphoneCore, device: *const c_char) -> c_int;
     fn linphone_core_set_capture_device(core: *mut LinphoneCore, device: *const c_char) -> c_int;
     fn linphone_core_set_ringer_device(core: *mut LinphoneCore, device: *const c_char) -> c_int;
+    fn linphone_core_set_media_device(core: *mut LinphoneCore, device: *const c_char) -> c_int;
     fn linphone_core_set_play_level(core: *mut LinphoneCore, level: c_int);
     fn linphone_core_set_rec_level(core: *mut LinphoneCore, level: c_int);
     fn linphone_core_set_mic_gain_db(core: *mut LinphoneCore, level: c_float);
@@ -1041,20 +1042,12 @@ fn configure_linphone_audio(core: *mut LinphoneCore) -> String {
                 }
             }
             if !playback_device.is_null() {
-                let current_playback = linphone_core_get_playback_device(core);
-                let current_ringer = linphone_core_get_ringer_device(core);
-                if current_playback.is_null() || c_string_or_empty(current_playback).is_empty() {
-                    let _ = linphone_core_set_playback_device(core, playback_device);
-                }
-                if current_ringer.is_null() || c_string_or_empty(current_ringer).is_empty() {
-                    let _ = linphone_core_set_ringer_device(core, playback_device);
-                }
+                let _ = linphone_core_set_playback_device(core, playback_device);
+                let _ = linphone_core_set_ringer_device(core, playback_device);
+                let _ = linphone_core_set_media_device(core, playback_device);
             }
             if !capture_device.is_null() {
-                let current_capture = linphone_core_get_capture_device(core);
-                if current_capture.is_null() || c_string_or_empty(current_capture).is_empty() {
-                    let _ = linphone_core_set_capture_device(core, capture_device);
-                }
+                let _ = linphone_core_set_capture_device(core, capture_device);
             }
         }
     }
