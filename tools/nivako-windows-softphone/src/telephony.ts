@@ -1,6 +1,7 @@
 export interface TelephonyAdapter {
   register(): Promise<void>;
   dial(number: string): Promise<void>;
+  accept?(): Promise<void>;
   hangup(): Promise<void>;
   hold(): Promise<void>;
   mute?(): Promise<void>;
@@ -32,6 +33,10 @@ export class SafeTelephonyAdapter implements TelephonyAdapter {
   }
 
   async hangup(): Promise<void> {
+    await Promise.resolve();
+  }
+
+  async accept(): Promise<void> {
     await Promise.resolve();
   }
 
@@ -95,6 +100,13 @@ export class WebRtcSipAdapter implements TelephonyAdapter {
 
   async hangup(): Promise<void> {
     this.session?.terminate();
+  }
+
+  async accept(): Promise<void> {
+    await this.session?.answer?.({
+      mediaConstraints: this.getMediaConstraints(),
+      rtcOfferConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false }
+    });
   }
 
   async hold(): Promise<void> {
