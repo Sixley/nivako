@@ -53,6 +53,7 @@ type LinphoneCallParams = c_void;
 type LinphonePayloadType = c_void;
 type LinphoneFactory = c_void;
 type MSFactory = c_void;
+type LinphoneCoreCbs = c_void;
 
 #[repr(C)]
 struct BctbxList {
@@ -77,6 +78,7 @@ struct LinphoneSipTransports {
 extern "C" {
     fn linphone_factory_get() -> *mut LinphoneFactory;
     fn linphone_factory_set_msplugins_dir(factory: *mut LinphoneFactory, path: *const c_char);
+    fn linphone_factory_create_core_cbs(factory: *mut LinphoneFactory) -> *mut LinphoneCoreCbs;
     fn linphone_core_new(
         vtable: *const c_void,
         config_path: *const c_char,
@@ -185,9 +187,23 @@ extern "C" {
         params: *const LinphoneCallParams,
     ) -> *mut LinphoneCall;
     fn linphone_call_params_unref(params: *mut LinphoneCallParams);
+    fn linphone_core_add_callbacks(core: *mut LinphoneCore, cbs: *mut LinphoneCoreCbs);
+    fn linphone_core_cbs_unref(cbs: *mut LinphoneCoreCbs);
+    fn linphone_core_cbs_set_call_state_changed(
+        cbs: *mut LinphoneCoreCbs,
+        cb: Option<
+            unsafe extern "C" fn(
+                core: *mut LinphoneCore,
+                call: *mut LinphoneCall,
+                state: c_int,
+                message: *const c_char,
+            ),
+        >,
+    );
     fn linphone_core_get_current_call(core: *const LinphoneCore) -> *mut LinphoneCall;
     fn linphone_call_get_state(call: *const LinphoneCall) -> c_int;
     fn linphone_call_state_to_string(state: c_int) -> *const c_char;
+    fn linphone_call_accept(call: *mut LinphoneCall) -> c_int;
     fn linphone_core_terminate_all_calls(core: *mut LinphoneCore) -> c_int;
     fn linphone_core_pause_call(core: *mut LinphoneCore, call: *mut LinphoneCall) -> c_int;
     fn linphone_core_resume_call(core: *mut LinphoneCore, call: *mut LinphoneCall) -> c_int;
@@ -235,6 +251,8 @@ static SIP_SNAPSHOT: Lazy<Arc<Mutex<NativeSipSnapshot>>> = Lazy::new(|| {
 static SIP_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
 static SIP_SIDECAR: Lazy<Arc<Mutex<Option<SipSidecarClient>>>> =
     Lazy::new(|| Arc::new(Mutex::new(None)));
+static SIP_LAST_CALL_EVENT: Lazy<Arc<Mutex<Option<String>>>> =
+    Lazy::new(|| Arc::new(Mutex::new(None)));
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
@@ -252,6 +270,7 @@ enum SipSidecarCommand {
         sip_server: String,
         sip_extension: String,
     },
+    Accept,
     Hangup,
     Hold,
     Mute {
@@ -810,23 +829,85 @@ fn account_registration_state(account: *mut LinphoneAccount) -> (bool, String) {
 fn call_state(core: *mut LinphoneCore) -> String {
     let call = unsafe { linphone_core_get_current_call(core) };
     if call.is_null() {
+        if let Some(event) = last_call_event() {
+            let normalized = normalize_linphone_call_state(&event);
+            if matches!(
+                normalized.as_str(),
+                "ringing" | "active" | "held" | "dialing"
+            ) {
+                return normalized;
+            }
+        }
         return "idle".to_string();
     }
     let state = unsafe { linphone_call_get_state(call) };
     let label = c_string_or_empty(unsafe { linphone_call_state_to_string(state) });
+    normalize_linphone_call_state(&label)
+}
+
+fn normalize_linphone_call_state(label: &str) -> String {
     let lower = label.to_ascii_lowercase();
     if lower.contains("streams running") || lower.contains("connected") {
         "active".to_string()
     } else if lower.contains("paused") || lower.contains("pausing") {
         "held".to_string()
-    } else if lower.contains("incoming") || lower.contains("outgoing") || lower.contains("ringing")
-    {
+    } else if lower.contains("outgoing") {
+        "dialing".to_string()
+    } else if lower.contains("incoming") || lower.contains("ringing") {
         "ringing".to_string()
     } else if lower.contains("end") || lower.contains("released") || lower.contains("error") {
         "idle".to_string()
     } else {
-        label
+        label.to_string()
     }
+}
+
+fn last_call_event() -> Option<String> {
+    SIP_LAST_CALL_EVENT
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
+
+fn set_last_call_event(event: String) {
+    if let Ok(mut guard) = SIP_LAST_CALL_EVENT.lock() {
+        *guard = Some(event);
+    }
+}
+
+unsafe extern "C" fn on_linphone_call_state_changed(
+    _core: *mut LinphoneCore,
+    _call: *mut LinphoneCall,
+    state: c_int,
+    message: *const c_char,
+) {
+    let state_label = c_string_or_empty(linphone_call_state_to_string(state));
+    let message_text = c_string_or_empty(message);
+    let event = if message_text.is_empty() {
+        format!("Call-Event={state_label}")
+    } else {
+        format!("Call-Event={state_label}: {message_text}")
+    };
+    set_last_call_event(event);
+}
+
+fn install_linphone_call_callbacks(core: *mut LinphoneCore) {
+    let factory = unsafe { linphone_factory_get() };
+    if factory.is_null() {
+        set_last_call_event("Call-Event=Callback-Factory fehlt".to_string());
+        return;
+    }
+    let callbacks = unsafe { linphone_factory_create_core_cbs(factory) };
+    if callbacks.is_null() {
+        set_last_call_event("Call-Event=Callback-Erstellung fehlgeschlagen".to_string());
+        return;
+    }
+    unsafe {
+        linphone_core_cbs_set_call_state_changed(callbacks, Some(on_linphone_call_state_changed));
+        linphone_core_add_callbacks(core, callbacks);
+        linphone_core_cbs_unref(callbacks);
+    }
+    set_last_call_event("Call-Event=Callback aktiv".to_string());
 }
 
 fn linphone_audio_summary(core: *mut LinphoneCore) -> String {
@@ -994,12 +1075,15 @@ fn session_snapshot(session: &LinphoneSession, message: String) -> NativeSipSnap
     } else {
         registration_state(session.proxy)
     };
+    let call_event = last_call_event()
+        .map(|event| format!(" {event}."))
+        .unwrap_or_default();
     NativeSipSnapshot {
         registered,
         call_state: call_state(session.core),
         provider: "liblinphone".to_string(),
         message: format!(
-            "{message} SIP-Status: {registration_label}. {}",
+            "{message}{call_event} SIP-Status: {registration_label}. {}",
             session.audio_profile
         ),
         held: session.held,
@@ -1322,6 +1406,7 @@ fn sip_register_linphone(
             "liblinphone Core konnte nicht erstellt werden".to_string(),
         ));
     }
+    install_linphone_call_callbacks(core);
     let plugin_load = load_linphone_media_plugins(core);
     unsafe {
         let transports = LinphoneSipTransports {
@@ -1598,6 +1683,12 @@ fn sidecar_reply(command: SipSidecarCommand) -> SipSidecarReply {
             sip_server,
             sip_extension,
         } => match sip_dial(number, sip_server, sip_extension) {
+            Ok(status) => SipSidecarReply::Status { status },
+            Err(error) => SipSidecarReply::Error {
+                message: error.to_string(),
+            },
+        },
+        SipSidecarCommand::Accept => match sip_accept() {
             Ok(status) => SipSidecarReply::Status { status },
             Err(error) => SipSidecarReply::Error {
                 message: error.to_string(),
@@ -2010,6 +2101,42 @@ fn sip_dial(
 }
 
 #[tauri::command]
+fn sip_accept() -> Result<NativeSipStatus, AppError> {
+    if !is_sip_sidecar_process() {
+        return match sip_sidecar_call(SipSidecarCommand::Accept)? {
+            SipSidecarReply::Status { status } => Ok(status),
+            SipSidecarReply::Error { message } => Err(AppError::Message(message)),
+            SipSidecarReply::Snapshot { snapshot } => Ok(NativeSipStatus {
+                registered: snapshot.registered,
+                message: snapshot.message,
+            }),
+        };
+    }
+
+    with_session(|session| {
+        let call = unsafe { linphone_core_get_current_call(session.core) };
+        if call.is_null() {
+            return Err(AppError::Message(
+                "Kein eingehender Anruf zum Annehmen".to_string(),
+            ));
+        }
+        let status = unsafe { linphone_call_accept(call) };
+        tick_core_for(session.core, 10, 100);
+        if status != 0 {
+            return Err(AppError::Message(format!(
+                "Annehmen wurde von liblinphone abgelehnt (status={status})"
+            )));
+        }
+        let snapshot = session_snapshot(session, "Eingehender Anruf angenommen.".to_string());
+        set_sip_snapshot(snapshot.clone());
+        Ok(NativeSipStatus {
+            registered: snapshot.registered,
+            message: snapshot.message,
+        })
+    })
+}
+
+#[tauri::command]
 fn sip_hangup() -> Result<NativeSipStatus, AppError> {
     if !is_sip_sidecar_process() {
         return match sip_sidecar_call(SipSidecarCommand::Hangup)? {
@@ -2166,6 +2293,7 @@ pub fn run() {
             sip_register,
             sip_status,
             sip_dial,
+            sip_accept,
             sip_hangup,
             sip_hold,
             sip_mute,
