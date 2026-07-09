@@ -111,6 +111,8 @@ extern "C" {
     fn linphone_core_set_rec_level(core: *mut LinphoneCore, level: c_int);
     fn linphone_core_set_mic_gain_db(core: *mut LinphoneCore, level: c_float);
     fn linphone_core_set_playback_gain_db(core: *mut LinphoneCore, level: c_float);
+    fn linphone_core_enable_video_capture(core: *mut LinphoneCore, enable: bool_t);
+    fn linphone_core_enable_video_display(core: *mut LinphoneCore, enable: bool_t);
     fn linphone_core_set_download_bandwidth(core: *mut LinphoneCore, bandwidth: c_int);
     fn linphone_core_set_upload_bandwidth(core: *mut LinphoneCore, bandwidth: c_int);
     fn linphone_core_enable_adaptive_rate_control(core: *mut LinphoneCore, enabled: bool_t);
@@ -169,10 +171,6 @@ extern "C" {
     fn linphone_registration_state_to_string(state: c_int) -> *const c_char;
     fn linphone_address_new(address: *const c_char) -> *mut LinphoneAddress;
     fn linphone_address_unref(address: *mut LinphoneAddress);
-    fn linphone_core_invite_address(
-        core: *mut LinphoneCore,
-        address: *const LinphoneAddress,
-    ) -> *mut LinphoneCall;
     fn linphone_core_create_call_params(
         core: *mut LinphoneCore,
         call: *const LinphoneCall,
@@ -181,6 +179,8 @@ extern "C" {
         params: *mut LinphoneCallParams,
         account: *mut LinphoneAccount,
     );
+    fn linphone_call_params_enable_audio(params: *mut LinphoneCallParams, enable: bool_t);
+    fn linphone_call_params_enable_video(params: *mut LinphoneCallParams, enable: bool_t);
     fn linphone_core_invite_address_with_params(
         core: *mut LinphoneCore,
         address: *const LinphoneAddress,
@@ -1011,6 +1011,8 @@ fn configure_linphone_audio(core: *mut LinphoneCore) -> String {
         linphone_core_set_rec_level(core, 70);
         linphone_core_set_mic_gain_db(core, 0.0);
         linphone_core_set_playback_gain_db(core, 0.0);
+        linphone_core_enable_video_capture(core, 0);
+        linphone_core_enable_video_display(core, 0);
         linphone_core_set_download_bandwidth(core, 64);
         linphone_core_set_upload_bandwidth(core, 64);
         linphone_core_enable_adaptive_rate_control(core, 1);
@@ -2051,21 +2053,34 @@ fn sip_dial(
             return Err(AppError::Message(format!("Ungueltiges SIP-Ziel: {target}")));
         }
         let call = unsafe {
-            let call = linphone_core_invite_address(session.core, address);
+            let params = linphone_core_create_call_params(session.core, ptr::null());
+            if params.is_null() {
+                linphone_address_unref(address);
+                return Err(AppError::Message(
+                    "Anrufparameter konnten nicht erstellt werden".to_string(),
+                ));
+            }
+            if !session.account.is_null() {
+                linphone_call_params_set_account(params, session.account);
+            }
+            linphone_call_params_enable_audio(params, 1);
+            linphone_call_params_enable_video(params, 0);
+            let call = linphone_core_invite_address_with_params(session.core, address, params);
+            linphone_call_params_unref(params);
             linphone_address_unref(address);
             call
         };
         tick_core_for(session.core, 10, 100);
         if call.is_null() {
             return Err(AppError::Message(format!(
-                "Anruf konnte nicht gestartet werden. Ziel={target}. Dial-Pfad=direct-core-invite-restore. SIP-Status: {state_label}. {}",
+                "Anruf konnte nicht gestartet werden. Ziel={target}. Dial-Pfad=audio-call-params. SIP-Status: {state_label}. {}",
                 session.audio_profile
             )));
         }
         let snapshot = session_snapshot(
             session,
             format!(
-                "Nativer Anruf gestartet: {} -> {number}. Ziel={target}. Dial-Pfad=direct-core-invite-restore.",
+                "Nativer Anruf gestartet: {} -> {number}. Ziel={target}. Dial-Pfad=audio-call-params.",
                 session.sip_extension
             ),
         );
