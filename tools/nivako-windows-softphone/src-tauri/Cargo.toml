@@ -1,6 +1,6 @@
 [package]
 name = "nivako-softphone"
-version = "0.2.14"
+version = "0.2.15"
 description = "NIVAKO Windows Softphone"
 authors = ["NIVAKO"]
 edition = "2021"
