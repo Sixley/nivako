@@ -54,6 +54,7 @@ type LinphonePayloadType = c_void;
 type LinphoneFactory = c_void;
 type MSFactory = c_void;
 type LinphoneCoreCbs = c_void;
+type LinphoneErrorInfo = c_void;
 
 #[repr(C)]
 struct BctbxList {
@@ -206,6 +207,15 @@ extern "C" {
     fn linphone_core_get_current_call(core: *const LinphoneCore) -> *mut LinphoneCall;
     fn linphone_call_get_state(call: *const LinphoneCall) -> c_int;
     fn linphone_call_state_to_string(state: c_int) -> *const c_char;
+    fn linphone_call_get_params(call: *mut LinphoneCall) -> *const LinphoneCallParams;
+    fn linphone_call_get_current_params(call: *mut LinphoneCall) -> *const LinphoneCallParams;
+    fn linphone_call_get_remote_params(call: *mut LinphoneCall) -> *const LinphoneCallParams;
+    fn linphone_call_params_audio_enabled(params: *const LinphoneCallParams) -> bool_t;
+    fn linphone_call_params_video_enabled(params: *const LinphoneCallParams) -> bool_t;
+    fn linphone_call_get_error_info(call: *const LinphoneCall) -> *const LinphoneErrorInfo;
+    fn linphone_error_info_get_protocol_code(info: *const LinphoneErrorInfo) -> c_int;
+    fn linphone_error_info_get_phrase(info: *const LinphoneErrorInfo) -> *const c_char;
+    fn linphone_error_info_get_protocol(info: *const LinphoneErrorInfo) -> *const c_char;
     fn linphone_call_accept(call: *mut LinphoneCall) -> c_int;
     fn linphone_core_terminate_all_calls(core: *mut LinphoneCore) -> c_int;
     fn linphone_core_pause_call(core: *mut LinphoneCore, call: *mut LinphoneCall) -> c_int;
@@ -883,18 +893,60 @@ fn set_last_call_event(event: String) {
 
 unsafe extern "C" fn on_linphone_call_state_changed(
     _core: *mut LinphoneCore,
-    _call: *mut LinphoneCall,
+    call: *mut LinphoneCall,
     state: c_int,
     message: *const c_char,
 ) {
     let state_label = c_string_or_empty(linphone_call_state_to_string(state));
     let message_text = c_string_or_empty(message);
+    let diagnostics = linphone_call_diagnostics(call);
     let event = if message_text.is_empty() {
-        format!("Call-Event={state_label}")
+        format!("Call-Event={state_label}. {diagnostics}")
     } else {
-        format!("Call-Event={state_label}: {message_text}")
+        format!("Call-Event={state_label}: {message_text}. {diagnostics}")
     };
     set_last_call_event(event);
+}
+
+unsafe fn linphone_call_diagnostics(call: *mut LinphoneCall) -> String {
+    if call.is_null() {
+        return "SIP-Ende=unbekannt; SDP-Audio=unbekannt (kein Call-Objekt)".to_string();
+    }
+
+    fn media_flags(params: *const LinphoneCallParams) -> String {
+        if params.is_null() {
+            return "n/a".to_string();
+        }
+        unsafe {
+            format!(
+                "audio={},video={}",
+                linphone_call_params_audio_enabled(params) != 0,
+                linphone_call_params_video_enabled(params) != 0
+            )
+        }
+    }
+
+    let local = media_flags(linphone_call_get_params(call));
+    let current = media_flags(linphone_call_get_current_params(call));
+    let remote = media_flags(linphone_call_get_remote_params(call));
+    let error = linphone_call_get_error_info(call);
+    let sip_end = if error.is_null() {
+        "unbekannt".to_string()
+    } else {
+        let protocol = c_string_or_empty(linphone_error_info_get_protocol(error));
+        let code = linphone_error_info_get_protocol_code(error);
+        let phrase = c_string_or_empty(linphone_error_info_get_phrase(error));
+        format!(
+            "{} {} {}",
+            if protocol.is_empty() { "SIP" } else { &protocol },
+            code,
+            if phrase.is_empty() { "ohne Fehlerphrase" } else { &phrase }
+        )
+    };
+
+    format!(
+        "SIP-Ende={sip_end}; SDP-Medien: lokal[{local}], aktuell[{current}], remote[{remote}]"
+    )
 }
 
 fn install_linphone_call_callbacks(core: *mut LinphoneCore) {

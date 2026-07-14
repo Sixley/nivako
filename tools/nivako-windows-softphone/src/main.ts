@@ -13,8 +13,8 @@ import type { CallEntry, Contact, NativeSipSnapshot, Settings, SoftphoneState } 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.2.22";
-const buildLabel = "0.2.22 Windows Audio Reload";
+const appVersion = "0.2.23";
+const buildLabel = "0.2.23 SIP/SDP Diagnose";
 const cardDavRefreshMs = 15 * 60 * 1000;
 const sipReconnectMs = 60 * 1000;
 const sipStatusPollMs = 2000;
