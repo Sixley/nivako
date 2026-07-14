@@ -1,4 +1,5 @@
 import "./styles.css";
+import brandLogoUrl from "./assets/nivako-softphone-logo.png";
 import { loadAudioDevices, type AudioDeviceState } from "./audioDevices";
 import { parseManyVCards } from "./carddav";
 import { syncCardDavContacts } from "./contactsRepository";
@@ -716,11 +717,8 @@ function render(): void {
     <section class="shell">
       <aside class="sidebar">
         <div class="brand">
-          <span class="brand-mark">N</span>
-          <div>
-            <strong>NIVAKO Softphone</strong>
-            <small>v${appVersion} · ${state.registered ? `${escapeHtml(settings.sipExtension)} registriert` : "SIP nicht registriert"}</small>
-          </div>
+          <img class="brand-logo" src="${brandLogoUrl}" alt="NIVAKO Softphone – VoIP Client" />
+          <small>v${appVersion} · ${state.registered ? `${escapeHtml(settings.sipExtension)} registriert` : "SIP nicht registriert"}</small>
         </div>
         <nav class="nav">
           ${navButton("contacts", "Kontakte")}

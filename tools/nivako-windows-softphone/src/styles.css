@@ -70,23 +70,16 @@ button:disabled {
 }
 
 .brand {
-  display: flex;
-  align-items: center;
-  gap: 12px;
+  display: grid;
+  gap: 10px;
   margin-bottom: 32px;
 }
 
-.brand-mark {
-  position: relative;
-  display: grid;
-  place-items: center;
-  width: 44px;
-  height: 44px;
-  border: 3px solid var(--brand);
-  border-right-color: transparent;
-  border-radius: 999px;
-  color: #ffffff;
-  font-weight: 900;
+.brand-logo {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 6px;
 }
 
 .brand small,
