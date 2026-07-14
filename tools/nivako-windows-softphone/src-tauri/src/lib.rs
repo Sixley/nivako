@@ -93,6 +93,8 @@ extern "C" {
     fn linphone_core_set_sip_network_reachable(core: *mut LinphoneCore, reachable: bool_t);
     fn linphone_core_set_media_network_reachable(core: *mut LinphoneCore, reachable: bool_t);
     fn linphone_core_get_sound_devices(core: *mut LinphoneCore) -> *const *const c_char;
+    fn linphone_core_reload_ms_plugins(core: *mut LinphoneCore, path: *const c_char);
+    fn linphone_core_reload_sound_devices(core: *mut LinphoneCore);
     fn linphone_core_sound_device_can_capture(
         core: *mut LinphoneCore,
         device: *const c_char,
@@ -412,7 +414,10 @@ fn load_linphone_media_plugins(core: *mut LinphoneCore) -> String {
         } else {
             ms_factory_set_plugins_dir(factory, c_plugin_dir.as_ptr());
             ms_factory_init_plugins(factory);
-            ms_factory_load_plugins(factory, c_plugin_dir.as_ptr())
+            let loaded = ms_factory_load_plugins(factory, c_plugin_dir.as_ptr());
+            linphone_core_reload_ms_plugins(core, c_plugin_dir.as_ptr());
+            linphone_core_reload_sound_devices(core);
+            loaded
         }
     };
 
@@ -1402,7 +1407,6 @@ fn sip_register_linphone(
         ));
     }
     install_linphone_call_callbacks(core);
-    let plugin_load = load_linphone_media_plugins(core);
     unsafe {
         let transports = LinphoneSipTransports {
             udp_port: -1,
@@ -1415,13 +1419,6 @@ fn sip_register_linphone(
         linphone_core_set_sip_network_reachable(core, 1);
         linphone_core_set_media_network_reachable(core, 1);
     }
-    let audio_profile = format!(
-        "{}. {}. {}",
-        plugin_config,
-        plugin_load,
-        configure_linphone_audio(core)
-    );
-
     let result: Result<(*mut LinphoneAccount, c_int), AppError> = unsafe {
         let auth = linphone_auth_info_new(
             username.as_ptr(),
@@ -1492,6 +1489,17 @@ fn sip_register_linphone(
     };
 
     let (account, start_status) = result?;
+    // The Windows sound-card manager is only ready after Core::start().
+    // Reload the packaged WASAPI plugin and rescan devices before selecting
+    // playback/capture devices and creating call parameters.
+    let plugin_load = load_linphone_media_plugins(core);
+    tick_core_for(core, 5, 20);
+    let audio_profile = format!(
+        "{}. {}. {}",
+        plugin_config,
+        plugin_load,
+        configure_linphone_audio(core)
+    );
     let session = LinphoneSession {
         core,
         proxy: ptr::null_mut(),
