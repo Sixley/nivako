@@ -32,6 +32,8 @@ struct NativeSipSnapshot {
     message: String,
     held: bool,
     muted: bool,
+    remote_name: String,
+    remote_number: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -175,6 +177,8 @@ extern "C" {
     fn linphone_registration_state_to_string(state: c_int) -> *const c_char;
     fn linphone_address_new(address: *const c_char) -> *mut LinphoneAddress;
     fn linphone_address_unref(address: *mut LinphoneAddress);
+    fn linphone_address_get_display_name(address: *const LinphoneAddress) -> *const c_char;
+    fn linphone_address_get_username(address: *const LinphoneAddress) -> *const c_char;
     fn linphone_core_create_call_params(
         core: *mut LinphoneCore,
         call: *const LinphoneCall,
@@ -210,6 +214,7 @@ extern "C" {
     );
     fn linphone_core_get_current_call(core: *const LinphoneCore) -> *mut LinphoneCall;
     fn linphone_call_get_state(call: *const LinphoneCall) -> c_int;
+    fn linphone_call_get_remote_address(call: *const LinphoneCall) -> *const LinphoneAddress;
     fn linphone_call_state_to_string(state: c_int) -> *const c_char;
     fn linphone_call_get_params(call: *mut LinphoneCall) -> *const LinphoneCallParams;
     fn linphone_call_get_current_params(call: *mut LinphoneCall) -> *const LinphoneCallParams;
@@ -225,6 +230,7 @@ extern "C" {
     fn linphone_core_pause_call(core: *mut LinphoneCore, call: *mut LinphoneCall) -> c_int;
     fn linphone_core_resume_call(core: *mut LinphoneCore, call: *mut LinphoneCall) -> c_int;
     fn linphone_core_enable_mic(core: *mut LinphoneCore, enable: bool_t);
+    fn linphone_core_set_ring_level(core: *mut LinphoneCore, level: c_int);
     fn linphone_call_send_dtmf(call: *mut LinphoneCall, dtmf: c_char) -> c_int;
     fn ms_factory_set_plugins_dir(factory: *mut MSFactory, path: *const c_char);
     fn ms_factory_load_plugins(factory: *mut MSFactory, directory: *const c_char) -> c_int;
@@ -263,6 +269,8 @@ static SIP_SNAPSHOT: Lazy<Arc<Mutex<NativeSipSnapshot>>> = Lazy::new(|| {
         message: "SIP nicht registriert.".to_string(),
         held: false,
         muted: false,
+        remote_name: String::new(),
+        remote_number: String::new(),
     }))
 });
 static SIP_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
@@ -292,6 +300,9 @@ enum SipSidecarCommand {
     Hold,
     Mute {
         muted: bool,
+    },
+    SetRingVolume {
+        volume: c_int,
     },
     Dtmf {
         digit: String,
@@ -903,7 +914,7 @@ unsafe extern "C" fn on_linphone_call_state_changed(
 ) {
     let state_label = c_string_or_empty(linphone_call_state_to_string(state));
     let message_text = c_string_or_empty(message);
-    let diagnostics = linphone_call_diagnostics(call);
+    let diagnostics = linphone_call_diagnostics(call, &state_label);
     let event = if message_text.is_empty() {
         format!("Call-Event={state_label}. {diagnostics}")
     } else {
@@ -912,7 +923,7 @@ unsafe extern "C" fn on_linphone_call_state_changed(
     set_last_call_event(event);
 }
 
-unsafe fn linphone_call_diagnostics(call: *mut LinphoneCall) -> String {
+unsafe fn linphone_call_diagnostics(call: *mut LinphoneCall, state_label: &str) -> String {
     if call.is_null() {
         return "SIP-Ende=unbekannt; SDP-Audio=unbekannt (kein Call-Objekt)".to_string();
     }
@@ -940,12 +951,19 @@ unsafe fn linphone_call_diagnostics(call: *mut LinphoneCall) -> String {
         let protocol = c_string_or_empty(linphone_error_info_get_protocol(error));
         let code = linphone_error_info_get_protocol_code(error);
         let phrase = c_string_or_empty(linphone_error_info_get_phrase(error));
-        format!(
-            "{} {} {}",
-            if protocol.is_empty() { "SIP" } else { &protocol },
-            code,
-            if phrase.is_empty() { "ohne Fehlerphrase" } else { &phrase }
-        )
+        if state_label.to_ascii_lowercase().contains("released")
+            && protocol.eq_ignore_ascii_case("Q.850")
+            && code == 400
+        {
+            "normal beendet".to_string()
+        } else {
+            format!(
+                "{} {} {}",
+                if protocol.is_empty() { "SIP" } else { &protocol },
+                code,
+                if phrase.is_empty() { "ohne Fehlerphrase" } else { &phrase }
+            )
+        }
     };
 
     format!(
@@ -1136,6 +1154,7 @@ fn session_snapshot(session: &LinphoneSession, message: String) -> NativeSipSnap
     let call_event = last_call_event()
         .map(|event| format!(" {event}."))
         .unwrap_or_default();
+    let (remote_name, remote_number) = current_remote_identity(session.core);
     NativeSipSnapshot {
         registered,
         call_state: call_state(session.core),
@@ -1146,7 +1165,24 @@ fn session_snapshot(session: &LinphoneSession, message: String) -> NativeSipSnap
         ),
         held: session.held,
         muted: session.muted,
+        remote_name,
+        remote_number,
     }
+}
+
+fn current_remote_identity(core: *mut LinphoneCore) -> (String, String) {
+    let call = unsafe { linphone_core_get_current_call(core) };
+    if call.is_null() {
+        return (String::new(), String::new());
+    }
+    let address = unsafe { linphone_call_get_remote_address(call) };
+    if address.is_null() {
+        return (String::new(), String::new());
+    }
+    (
+        c_string_or_empty(unsafe { linphone_address_get_display_name(address) }),
+        c_string_or_empty(unsafe { linphone_address_get_username(address) }),
+    )
 }
 
 fn refresh_sip_snapshot_from_session(message: String) -> Option<NativeSipSnapshot> {
@@ -1773,6 +1809,12 @@ fn sidecar_reply(command: SipSidecarCommand) -> SipSidecarReply {
                 message: error.to_string(),
             },
         },
+        SipSidecarCommand::SetRingVolume { volume } => match sip_set_ring_volume(volume) {
+            Ok(status) => SipSidecarReply::Status { status },
+            Err(error) => SipSidecarReply::Error {
+                message: error.to_string(),
+            },
+        },
         SipSidecarCommand::Dtmf { digit } => match sip_dtmf(digit) {
             Ok(status) => SipSidecarReply::Status { status },
             Err(error) => SipSidecarReply::Error {
@@ -1913,6 +1955,8 @@ fn sip_register(
                     message: status.message.clone(),
                     held: false,
                     muted: false,
+                    remote_name: String::new(),
+                    remote_number: String::new(),
                 });
                 Ok(status)
             }
@@ -1936,6 +1980,8 @@ fn sip_register(
                     message: message.clone(),
                     held: false,
                     muted: false,
+                    remote_name: String::new(),
+                    remote_number: String::new(),
                 });
                 Ok(NativeSipStatus {
                     registered: false,
@@ -1966,6 +2012,8 @@ fn sip_register(
                     message: message.clone(),
                     held: false,
                     muted: false,
+                    remote_name: String::new(),
+                    remote_number: String::new(),
                 });
                 Ok(NativeSipStatus {
                     registered: false,
@@ -2007,6 +2055,8 @@ fn sip_register(
                     message: message.clone(),
                     held: false,
                     muted: false,
+                    remote_name: String::new(),
+                    remote_number: String::new(),
                 });
                 Ok(NativeSipStatus {
                     registered: false,
@@ -2034,6 +2084,8 @@ fn sip_register(
         message: message.clone(),
         held: false,
         muted: false,
+        remote_name: String::new(),
+        remote_number: String::new(),
     });
     Ok(NativeSipStatus {
         registered: false,
@@ -2299,6 +2351,34 @@ fn sip_mute(muted: bool) -> Result<NativeSipStatus, AppError> {
 }
 
 #[tauri::command]
+fn sip_set_ring_volume(volume: c_int) -> Result<NativeSipStatus, AppError> {
+    let volume = volume.clamp(0, 100);
+    if !is_sip_sidecar_process() {
+        return match sip_sidecar_call(SipSidecarCommand::SetRingVolume { volume })? {
+            SipSidecarReply::Status { status } => Ok(status),
+            SipSidecarReply::Error { message } => Err(AppError::Message(message)),
+            SipSidecarReply::Snapshot { snapshot } => Ok(NativeSipStatus {
+                registered: snapshot.registered,
+                message: snapshot.message,
+            }),
+        };
+    }
+
+    with_session(|session| {
+        unsafe { linphone_core_set_ring_level(session.core, volume) };
+        let snapshot = session_snapshot(
+            session,
+            format!("Klingeltonlautstaerke auf {volume} Prozent gesetzt."),
+        );
+        set_sip_snapshot(snapshot.clone());
+        Ok(NativeSipStatus {
+            registered: snapshot.registered,
+            message: snapshot.message,
+        })
+    })
+}
+
+#[tauri::command]
 fn sip_dtmf(digit: String) -> Result<NativeSipStatus, AppError> {
     if !is_sip_sidecar_process() {
         return match sip_sidecar_call(SipSidecarCommand::Dtmf { digit })? {
@@ -2352,6 +2432,7 @@ pub fn run() {
             sip_hangup,
             sip_hold,
             sip_mute,
+            sip_set_ring_volume,
             sip_dtmf
         ])
         .run(tauri::generate_context!())

@@ -3,7 +3,7 @@ import brandLogoUrl from "./assets/nivako-softphone-logo.png";
 import { loadAudioDevices, type AudioDeviceState } from "./audioDevices";
 import { parseManyVCards } from "./carddav";
 import { syncCardDavContacts } from "./contactsRepository";
-import { getLastCardDavDiagnostic, getSipStatusNative, hasSecretNative, isTauriRuntime, loadSecretNative, saveSecretNative } from "./nativeBridge";
+import { getLastCardDavDiagnostic, getSipStatusNative, hasSecretNative, isTauriRuntime, loadSecretNative, saveSecretNative, setRingVolumeNative } from "./nativeBridge";
 import { canUseNativeTelephony, NativeTelephonyAdapter } from "./nativeTelephony";
 import { searchContacts } from "./search";
 import { loadContacts, loadFavoriteIds, loadHistory, loadSettings, saveContacts, saveFavoriteIds, saveHistory, saveSettings } from "./storage";
@@ -13,8 +13,8 @@ import type { CallEntry, Contact, NativeSipSnapshot, Settings, SoftphoneState } 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.2.24";
-const buildLabel = "0.2.24 Aktives Audio-SDP";
+const appVersion = "0.2.25";
+const buildLabel = "0.2.25 Eingehender Anruf";
 const cardDavRefreshMs = 15 * 60 * 1000;
 const sipReconnectMs = 60 * 1000;
 const sipStatusPollMs = 2000;
@@ -34,7 +34,8 @@ const defaultSettings: Settings = {
   useTelLinks: false,
   enableWebRtcSip: false,
   selectedMicrophoneId: "",
-  selectedSpeakerId: ""
+  selectedSpeakerId: "",
+  ringVolume: 75
 };
 
 let settings = loadSettings(defaultSettings);
@@ -205,6 +206,16 @@ function applyNativeSipSnapshot(snapshot: NativeSipSnapshot): void {
     callState: normalizeCallState(snapshot.call_state),
     muted: snapshot.muted
   };
+  const remoteNumber = snapshot.remote_number || state.remoteIdentity || "";
+  const matchedContact = contacts.find((contact) => contact.phones.some((phone) => phone.normalized === remoteNumber || phone.raw === remoteNumber));
+  if (nextState.callState === "ringing") {
+    nextState.activeNumber = remoteNumber || "Eingehend";
+    nextState.remoteIdentity = snapshot.remote_name || remoteNumber || "Unbekannter Anrufer";
+    nextState.activeContact = matchedContact;
+    document.title = `Eingehender Anruf – ${snapshot.remote_name || matchedContact?.displayName || remoteNumber || "Unbekannt"}`;
+  } else if (state.callState === "ringing") {
+    document.title = "NIVAKO Softphone";
+  }
   if (nextState.callState === "idle") {
     nextState.muted = false;
   }
@@ -631,6 +642,7 @@ function renderMainPanel(visibleContacts: Contact[]): string {
         <form class="settings-list" id="audio-form">
           <label><span>Mikrofon</span><select name="selectedMicrophoneId"><option value="">Systemstandard</option>${inputOptions}</select></label>
           <label><span>Lautsprecher</span><select name="selectedSpeakerId"><option value="">Systemstandard</option>${outputOptions}</select></label>
+          <label><span>Klingeltonlautstaerke: <output id="ring-volume-value">${settings.ringVolume}%</output></span><input id="ring-volume" name="ringVolume" type="range" min="0" max="100" step="5" value="${settings.ringVolume}" /></label>
           <button class="primary" type="submit">Audio speichern</button>
         </form>
       </section>
@@ -782,9 +794,30 @@ function render(): void {
         </div>
       </section>
     </section>
+    ${renderIncomingCallCard()}
   `;
 
   bindEvents();
+}
+
+function renderIncomingCallCard(): string {
+  if (state.callState !== "ringing") return "";
+  const caller = state.activeContact?.displayName || state.remoteIdentity || state.activeNumber || "Unbekannter Anrufer";
+  const detail = state.activeContact?.organization || state.activeNumber || "Eingehender SIP-Anruf";
+  return `
+    <aside class="incoming-call-card" role="alert" aria-live="assertive">
+      <div class="incoming-call-icon">☎</div>
+      <div class="incoming-call-copy">
+        <span>Eingehender Anruf</span>
+        <strong>${escapeHtml(caller)}</strong>
+        <small>${escapeHtml(detail)}</small>
+      </div>
+      <div class="incoming-call-actions">
+        <button class="primary" id="incoming-accept">Annehmen</button>
+        <button class="danger" id="incoming-reject">Ablehnen</button>
+      </div>
+    </aside>
+  `;
 }
 
 function bindEvents(): void {
@@ -823,6 +856,8 @@ function bindEvents(): void {
   });
 
   document.querySelector<HTMLButtonElement>("#dial")?.addEventListener("click", () => void dial());
+  document.querySelector<HTMLButtonElement>("#incoming-accept")?.addEventListener("click", () => void dial());
+  document.querySelector<HTMLButtonElement>("#incoming-reject")?.addEventListener("click", () => void hangup());
   document.querySelector<HTMLButtonElement>("#hangup")?.addEventListener("click", () => void hangup());
   document.querySelector<HTMLButtonElement>("#register-sip")?.addEventListener("click", () => void registerSip());
   document.querySelector<HTMLButtonElement>("#hold")?.addEventListener("click", () => void holdCall());
@@ -830,6 +865,11 @@ function bindEvents(): void {
   document.querySelector<HTMLButtonElement>("#backspace")?.addEventListener("click", deleteDigit);
   document.querySelector<HTMLButtonElement>("#sync-carddav")?.addEventListener("click", () => void syncCardDav());
   document.querySelector<HTMLButtonElement>("#refresh-audio")?.addEventListener("click", () => void refreshAudioDevices(true));
+  document.querySelector<HTMLInputElement>("#ring-volume")?.addEventListener("input", (event) => {
+    const value = (event.target as HTMLInputElement).value;
+    const output = document.querySelector<HTMLOutputElement>("#ring-volume-value");
+    if (output) output.value = `${value}%`;
+  });
   document.querySelector<HTMLButtonElement>("#clear-history")?.addEventListener("click", () => {
     callHistory = [];
     saveHistory(callHistory);
@@ -857,7 +897,8 @@ function bindEvents(): void {
       useTelLinks: form.get("useTelLinks") === "on",
       enableWebRtcSip: form.get("enableWebRtcSip") === "on",
       selectedMicrophoneId: settings.selectedMicrophoneId,
-      selectedSpeakerId: settings.selectedSpeakerId
+      selectedSpeakerId: settings.selectedSpeakerId,
+      ringVolume: settings.ringVolume
     };
     cardDavPassword = String(form.get("cardDavPassword") || "");
     sipPassword = String(form.get("sipPassword") || "");
@@ -883,9 +924,14 @@ function bindEvents(): void {
     settings = {
       ...settings,
       selectedMicrophoneId: String(form.get("selectedMicrophoneId") || ""),
-      selectedSpeakerId: String(form.get("selectedSpeakerId") || "")
+      selectedSpeakerId: String(form.get("selectedSpeakerId") || ""),
+      ringVolume: Number(form.get("ringVolume") || settings.ringVolume)
     };
     saveSettings(settings);
+    if (canUseNativeTelephony()) void setRingVolumeNative(settings.ringVolume).catch((error) => {
+      notice = errorMessage(error, "Klingeltonlautstaerke konnte nicht gesetzt werden");
+      render();
+    });
     configureTelephony();
     notice = "Audio-Einstellungen gespeichert.";
     render();

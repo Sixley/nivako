@@ -48,6 +48,7 @@ export interface Settings {
   enableWebRtcSip: boolean;
   selectedMicrophoneId: string;
   selectedSpeakerId: string;
+  ringVolume: number;
 }
 
 export interface NativeSipStatus {
@@ -62,4 +63,6 @@ export interface NativeSipSnapshot {
   message: string;
   held: boolean;
   muted: boolean;
+  remote_name: string;
+  remote_number: string;
 }
