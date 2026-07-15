@@ -3,7 +3,7 @@ import brandLogoUrl from "./assets/nivako-softphone-logo.png";
 import { loadAudioDevices, type AudioDeviceState } from "./audioDevices";
 import { parseManyVCards } from "./carddav";
 import { syncCardDavContacts } from "./contactsRepository";
-import { closeIncomingCallWindow, getLastCardDavDiagnostic, getSipStatusNative, hasSecretNative, isTauriRuntime, loadSecretNative, saveSecretNative, showIncomingCallWindow } from "./nativeBridge";
+import { getLastCardDavDiagnostic, getSipStatusNative, hasSecretNative, isTauriRuntime, loadSecretNative, saveSecretNative } from "./nativeBridge";
 import { canUseNativeTelephony, NativeTelephonyAdapter } from "./nativeTelephony";
 import { searchContacts } from "./search";
 import { loadContacts, loadFavoriteIds, loadHistory, loadSettings, saveContacts, saveFavoriteIds, saveHistory, saveSettings } from "./storage";
@@ -13,8 +13,8 @@ import type { CallEntry, Contact, NativeSipSnapshot, Settings, SoftphoneState } 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.2.28";
-const buildLabel = "0.2.28 Stabiler Rufzustand";
+const appVersion = "0.2.29";
+const buildLabel = "0.2.29 Stabilitaets-Rollback";
 const cardDavRefreshMs = 15 * 60 * 1000;
 const sipReconnectMs = 60 * 1000;
 const sipStatusPollMs = 2000;
@@ -34,8 +34,7 @@ const defaultSettings: Settings = {
   useTelLinks: false,
   enableWebRtcSip: false,
   selectedMicrophoneId: "",
-  selectedSpeakerId: "",
-  ringVolume: 75
+  selectedSpeakerId: ""
 };
 
 let settings = loadSettings(defaultSettings);
@@ -200,28 +199,12 @@ function normalizeCallState(value: string): SoftphoneState["callState"] {
 }
 
 function applyNativeSipSnapshot(snapshot: NativeSipSnapshot): void {
-  const reportedCallState = normalizeCallState(snapshot.call_state);
   const nextState = {
     ...state,
     registered: snapshot.registered,
-    callState: snapshot.held ? "held" as const : reportedCallState === "held" ? "active" as const : reportedCallState,
+    callState: normalizeCallState(snapshot.call_state),
     muted: snapshot.muted
   };
-  const remoteNumber = snapshot.remote_number || state.remoteIdentity || "";
-  const matchedContact = contacts.find((contact) => contact.phones.some((phone) => phone.normalized === remoteNumber || phone.raw === remoteNumber));
-  if (nextState.callState === "ringing") {
-    nextState.activeNumber = remoteNumber || "Eingehend";
-    nextState.remoteIdentity = snapshot.remote_name || remoteNumber || "Unbekannter Anrufer";
-    nextState.activeContact = matchedContact;
-    document.title = `Eingehender Anruf – ${snapshot.remote_name || matchedContact?.displayName || remoteNumber || "Unbekannt"}`;
-    if (isTauriRuntime()) {
-      const displayName = snapshot.remote_name || matchedContact?.displayName || remoteNumber || "Unbekannter Anrufer";
-      void showIncomingCallWindow(displayName, remoteNumber, settings.ringVolume).catch(() => undefined);
-    }
-  } else if (state.callState === "ringing") {
-    document.title = "NIVAKO Softphone";
-    if (isTauriRuntime()) void closeIncomingCallWindow().catch(() => undefined);
-  }
   if (nextState.callState === "idle") {
     nextState.muted = false;
   }
@@ -410,35 +393,16 @@ async function dial(): Promise<void> {
 }
 
 async function hangup(): Promise<void> {
-  const wasRinging = state.callState === "ringing";
-  state = { ...state, callState: "idle", activeNumber: "", activeContact: undefined, muted: false };
-  notice = wasRinging ? "Anruf wird abgelehnt." : "Anruf wird beendet.";
-  render();
-  try {
-    await telephony.hangup();
-  } catch (error) {
-    notice = errorMessage(error, wasRinging ? "Anruf konnte nicht abgelehnt werden" : "Anruf konnte nicht beendet werden");
-    render();
-    return;
-  }
+  await telephony.hangup();
   state = { ...state, callState: "idle", activeNumber: "", activeContact: undefined };
-  notice = wasRinging ? "Anruf abgelehnt." : "Anruf beendet.";
+  notice = "Anruf beendet.";
   render();
 }
 
 async function holdCall(): Promise<void> {
-  const resume = state.callState === "held";
-  notice = resume ? "Anruf wird fortgesetzt." : "Anruf wird gehalten.";
-  render();
-  try {
-    await telephony.hold();
-  } catch (error) {
-    notice = errorMessage(error, resume ? "Anruf konnte nicht fortgesetzt werden" : "Anruf konnte nicht gehalten werden");
-    render();
-    return;
-  }
-  state = { ...state, callState: resume ? "active" : "held" };
-  notice = resume ? "Anruf fortgesetzt." : "Anruf gehalten.";
+  await telephony.hold();
+  state = { ...state, callState: state.callState === "held" ? "active" : "held" };
+  notice = state.callState === "held" ? "Anruf gehalten." : "Anruf fortgesetzt.";
   render();
 }
 
@@ -667,7 +631,6 @@ function renderMainPanel(visibleContacts: Contact[]): string {
         <form class="settings-list" id="audio-form">
           <label><span>Mikrofon</span><select name="selectedMicrophoneId"><option value="">Systemstandard</option>${inputOptions}</select></label>
           <label><span>Lautsprecher</span><select name="selectedSpeakerId"><option value="">Systemstandard</option>${outputOptions}</select></label>
-          <label><span>Klingeltonlautstaerke: <output id="ring-volume-value">${settings.ringVolume}%</output></span><input id="ring-volume" name="ringVolume" type="range" min="0" max="100" step="5" value="${settings.ringVolume}" /></label>
           <button class="primary" type="submit">Audio speichern</button>
         </form>
       </section>
@@ -778,8 +741,7 @@ function render(): void {
           <strong>${escapeHtml(primaryStatusText())}</strong>
           <span>${escapeHtml(serviceLine())}</span>
         </div>
-        <div class="call-card ${state.callState === "ringing" ? "call-card-ringing" : ""}">
-          ${state.callState === "ringing" ? `<div class="in-app-incoming"><span>☎ Eingehender Anruf</span><strong>${escapeHtml(state.activeContact?.displayName || state.remoteIdentity || state.activeNumber || "Unbekannt")}</strong><small>${escapeHtml(state.activeNumber || "Nummer unterdrueckt")}</small></div>` : ""}
+        <div class="call-card">
           <div class="status-line">
             <span class="status-dot ${state.registered ? "" : "offline"}"></span>
             <span>${telephonyStatusText()}</span>
@@ -795,7 +757,7 @@ function render(): void {
           <div class="call-actions">
             <button class="secondary" id="register-sip" ${settings.enableWebRtcSip || canUseNativeTelephony() ? "" : "disabled"}>Registrieren</button>
             <button class="primary" id="dial" ${!state.activeNumber && state.callState !== "ringing" ? "disabled" : ""}>${state.callState === "ringing" ? "Annehmen" : settings.safeCallMode ? "Lokal erfassen" : "Anrufen"}</button>
-            <button class="danger" id="hangup" ${state.callState === "idle" ? "disabled" : ""}>${state.callState === "ringing" ? "Ablehnen" : "Auflegen"}</button>
+            <button class="danger" id="hangup" ${state.callState === "idle" ? "disabled" : ""}>Auflegen</button>
           </div>
           <div class="call-actions compact-actions">
             <button class="secondary" id="backspace" ${!state.activeNumber ? "disabled" : ""}>Rueck</button>
@@ -820,14 +782,9 @@ function render(): void {
         </div>
       </section>
     </section>
-    ${renderIncomingCallCard()}
   `;
 
   bindEvents();
-}
-
-function renderIncomingCallCard(): string {
-  return "";
 }
 
 function bindEvents(): void {
@@ -866,8 +823,6 @@ function bindEvents(): void {
   });
 
   document.querySelector<HTMLButtonElement>("#dial")?.addEventListener("click", () => void dial());
-  document.querySelector<HTMLButtonElement>("#incoming-accept")?.addEventListener("click", () => void dial());
-  document.querySelector<HTMLButtonElement>("#incoming-reject")?.addEventListener("click", () => void hangup());
   document.querySelector<HTMLButtonElement>("#hangup")?.addEventListener("click", () => void hangup());
   document.querySelector<HTMLButtonElement>("#register-sip")?.addEventListener("click", () => void registerSip());
   document.querySelector<HTMLButtonElement>("#hold")?.addEventListener("click", () => void holdCall());
@@ -875,11 +830,6 @@ function bindEvents(): void {
   document.querySelector<HTMLButtonElement>("#backspace")?.addEventListener("click", deleteDigit);
   document.querySelector<HTMLButtonElement>("#sync-carddav")?.addEventListener("click", () => void syncCardDav());
   document.querySelector<HTMLButtonElement>("#refresh-audio")?.addEventListener("click", () => void refreshAudioDevices(true));
-  document.querySelector<HTMLInputElement>("#ring-volume")?.addEventListener("input", (event) => {
-    const value = (event.target as HTMLInputElement).value;
-    const output = document.querySelector<HTMLOutputElement>("#ring-volume-value");
-    if (output) output.value = `${value}%`;
-  });
   document.querySelector<HTMLButtonElement>("#clear-history")?.addEventListener("click", () => {
     callHistory = [];
     saveHistory(callHistory);
@@ -907,8 +857,7 @@ function bindEvents(): void {
       useTelLinks: form.get("useTelLinks") === "on",
       enableWebRtcSip: form.get("enableWebRtcSip") === "on",
       selectedMicrophoneId: settings.selectedMicrophoneId,
-      selectedSpeakerId: settings.selectedSpeakerId,
-      ringVolume: settings.ringVolume
+      selectedSpeakerId: settings.selectedSpeakerId
     };
     cardDavPassword = String(form.get("cardDavPassword") || "");
     sipPassword = String(form.get("sipPassword") || "");
@@ -934,8 +883,7 @@ function bindEvents(): void {
     settings = {
       ...settings,
       selectedMicrophoneId: String(form.get("selectedMicrophoneId") || ""),
-      selectedSpeakerId: String(form.get("selectedSpeakerId") || ""),
-      ringVolume: Number(form.get("ringVolume") || settings.ringVolume)
+      selectedSpeakerId: String(form.get("selectedSpeakerId") || "")
     };
     saveSettings(settings);
     configureTelephony();
