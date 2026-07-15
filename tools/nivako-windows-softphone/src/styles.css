@@ -65,6 +65,16 @@
   50% { box-shadow: 0 20px 70px rgba(38, 126, 96, 0.46); }
 }
 
+body.incoming-popup-page { margin: 0; overflow: hidden; background: transparent; }
+.incoming-popup-page #app { min-height: 100vh; }
+.desktop-call-popup { box-sizing: border-box; height: 100vh; padding: 20px; display: grid; grid-template-columns: 48px 1fr; gap: 14px; align-items: center; background: #fffaf3; border: 2px solid #d89834; box-shadow: 0 14px 40px rgba(45,31,20,.28); }
+.desktop-call-symbol { width: 46px; height: 46px; border-radius: 50%; display: grid; place-items: center; background: #fff0d2; color: #9c5c00; font-size: 25px; }
+.desktop-call-popup span,.desktop-call-popup small,.desktop-call-popup strong { display:block; }
+.desktop-call-popup span { color:#795f45; font-size:13px; }
+.desktop-call-popup strong { color:#2d2117; font-size:20px; margin:3px 0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.desktop-call-popup small { color:#795f45; }
+.desktop-call-actions { grid-column:1/-1; display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+
 :root {
   color: #151515;
   background: #f4f2ee;

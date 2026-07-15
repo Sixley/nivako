@@ -1,4 +1,4 @@
-import { acceptNative, dialNative, hangupNative, holdNative, isTauriRuntime, muteNative, registerSipNative, sendDtmfNative, setRingVolumeNative } from "./nativeBridge";
+import { acceptNative, dialNative, hangupNative, holdNative, isTauriRuntime, muteNative, registerSipNative, sendDtmfNative } from "./nativeBridge";
 import type { Settings } from "./types";
 import type { TelephonyAdapter } from "./telephony";
 
@@ -11,7 +11,6 @@ export class NativeTelephonyAdapter implements TelephonyAdapter {
 
   async register(): Promise<void> {
     const result = await registerSipNative(this.settings(), this.password());
-    await setRingVolumeNative(this.settings().ringVolume).catch(() => undefined);
     this.onStatus(result.message, result.registered);
   }
 

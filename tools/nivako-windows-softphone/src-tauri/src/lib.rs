@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tauri::Manager;
 
 const CARDDAV_SERVICE: &str = "NIVAKO Softphone CardDAV";
 const SIP_SERVICE: &str = "NIVAKO Softphone SIP";
@@ -188,10 +189,7 @@ extern "C" {
         account: *mut LinphoneAccount,
     );
     fn linphone_call_params_enable_audio(params: *mut LinphoneCallParams, enable: bool_t);
-    fn linphone_call_params_set_audio_direction(
-        params: *mut LinphoneCallParams,
-        direction: c_int,
-    );
+    fn linphone_call_params_set_audio_direction(params: *mut LinphoneCallParams, direction: c_int);
     fn linphone_call_params_enable_video(params: *mut LinphoneCallParams, enable: bool_t);
     fn linphone_core_invite_address_with_params(
         core: *mut LinphoneCore,
@@ -959,16 +957,22 @@ unsafe fn linphone_call_diagnostics(call: *mut LinphoneCall, state_label: &str) 
         } else {
             format!(
                 "{} {} {}",
-                if protocol.is_empty() { "SIP" } else { &protocol },
+                if protocol.is_empty() {
+                    "SIP"
+                } else {
+                    &protocol
+                },
                 code,
-                if phrase.is_empty() { "ohne Fehlerphrase" } else { &phrase }
+                if phrase.is_empty() {
+                    "ohne Fehlerphrase"
+                } else {
+                    &phrase
+                }
             )
         }
     };
 
-    format!(
-        "SIP-Ende={sip_end}; SDP-Medien: lokal[{local}], aktuell[{current}], remote[{remote}]"
-    )
+    format!("SIP-Ende={sip_end}; SDP-Medien: lokal[{local}], aktuell[{current}], remote[{remote}]")
 }
 
 fn install_linphone_call_callbacks(core: *mut LinphoneCore) {
@@ -1053,7 +1057,8 @@ fn configure_linphone_codecs(core: *mut LinphoneCore) -> String {
             let number = unsafe { linphone_payload_type_get_number(payload) };
             let mime_upper = mime.to_ascii_uppercase();
             let keep =
-                matches!(mime_upper.as_str(), "PCMA" | "PCMU") && rate == 8000 && channels <= 1;
+                (matches!(mime_upper.as_str(), "PCMA" | "PCMU") && rate == 8000 && channels <= 1)
+                    || (mime_upper == "G722" && rate == 8000 && channels <= 1);
             let _ = unsafe { linphone_payload_type_enable(payload, if keep { 1 } else { 0 }) };
 
             let label = format!("{mime}/{rate}/{channels} pt={number}");
@@ -1091,6 +1096,9 @@ fn configure_linphone_audio(core: *mut LinphoneCore) -> String {
         linphone_core_set_rec_level(core, 70);
         linphone_core_set_mic_gain_db(core, 0.0);
         linphone_core_set_playback_gain_db(core, 0.0);
+        // The desktop popup owns ringing so its 0-100% control has a real,
+        // predictable effect independent of the WASAPI backend.
+        linphone_core_set_ring_level(core, 0);
         linphone_core_enable_video_capture(core, 0);
         linphone_core_enable_video_display(core, 0);
         // Zero means unrestricted. Capping the core at exactly 64 kbit/s can
@@ -2418,6 +2426,51 @@ fn sip_dtmf(digit: String) -> Result<NativeSipStatus, AppError> {
     })
 }
 
+#[tauri::command]
+fn show_incoming_call_window(app: tauri::AppHandle) -> Result<(), AppError> {
+    if let Some(window) = app.get_webview_window("incoming-call") {
+        window
+            .show()
+            .map_err(|e| AppError::Message(e.to_string()))?;
+        let _ = window.set_focus();
+        return Ok(());
+    }
+    let (mut x, mut y) = (24.0, 24.0);
+    if let Some(main) = app.get_webview_window("main") {
+        if let Ok(Some(monitor)) = main.current_monitor() {
+            let scale = monitor.scale_factor();
+            x = monitor.position().x as f64 / scale + monitor.size().width as f64 / scale - 396.0;
+            y = monitor.position().y as f64 / scale + monitor.size().height as f64 / scale - 226.0;
+        }
+    }
+    tauri::WebviewWindowBuilder::new(
+        &app,
+        "incoming-call",
+        tauri::WebviewUrl::App("index.html?incoming-call=1".into()),
+    )
+    .title("Eingehender Anruf")
+    .inner_size(372.0, 202.0)
+    .position(x, y)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .build()
+    .map_err(|e| AppError::Message(e.to_string()))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn close_incoming_call_window(app: tauri::AppHandle) -> Result<(), AppError> {
+    if let Some(window) = app.get_webview_window("incoming-call") {
+        window
+            .close()
+            .map_err(|e| AppError::Message(e.to_string()))?;
+    }
+    Ok(())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -2433,7 +2486,9 @@ pub fn run() {
             sip_hold,
             sip_mute,
             sip_set_ring_volume,
-            sip_dtmf
+            sip_dtmf,
+            show_incoming_call_window,
+            close_incoming_call_window
         ])
         .run(tauri::generate_context!())
         .expect("error while running NIVAKO Softphone");

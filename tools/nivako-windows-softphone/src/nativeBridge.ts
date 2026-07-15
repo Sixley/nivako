@@ -113,3 +113,6 @@ export async function sendDtmfNative(digit: string): Promise<NativeSipStatus> {
 export async function setRingVolumeNative(volume: number): Promise<NativeSipStatus> {
   return tauriInvokeWithTimeout<NativeSipStatus>("sip_set_ring_volume", { volume }, nativeSipTimeoutMs, "Klingeltonlautstaerke konnte nicht gesetzt werden.");
 }
+
+export async function showIncomingCallWindow(): Promise<void> { await tauriInvoke<void>("show_incoming_call_window"); }
+export async function closeIncomingCallWindow(): Promise<void> { await tauriInvoke<void>("close_incoming_call_window"); }
