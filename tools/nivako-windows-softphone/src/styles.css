@@ -73,6 +73,11 @@ body.incoming-popup-page { margin: 0; overflow: hidden; background: transparent;
 .desktop-call-popup span { color:#795f45; font-size:13px; }
 .desktop-call-popup strong { color:#2d2117; font-size:20px; margin:3px 0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .desktop-call-popup small { color:#795f45; }
+.call-card-ringing { border: 3px solid #e39a1f; box-shadow: 0 0 0 5px rgba(227,154,31,.16), 0 12px 32px rgba(91,58,16,.18); animation: incoming-call-glow 1.4s ease-in-out infinite; }
+.in-app-incoming { margin: 0 0 14px; padding: 12px 14px; border-radius: 12px; background: #fff1d7; color: #3b2817; }
+.in-app-incoming span,.in-app-incoming strong,.in-app-incoming small { display:block; }
+.in-app-incoming span { color:#9a5b00; font-weight:800; text-transform:uppercase; letter-spacing:.04em; font-size:12px; }
+.in-app-incoming strong { margin:3px 0; font-size:20px; }
 .desktop-call-actions { grid-column:1/-1; display:grid; grid-template-columns:1fr 1fr; gap:10px; }
 
 :root {

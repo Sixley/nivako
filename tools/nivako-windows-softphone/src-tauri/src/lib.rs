@@ -2427,7 +2427,12 @@ fn sip_dtmf(digit: String) -> Result<NativeSipStatus, AppError> {
 }
 
 #[tauri::command]
-fn show_incoming_call_window(app: tauri::AppHandle) -> Result<(), AppError> {
+fn show_incoming_call_window(
+    app: tauri::AppHandle,
+    name: String,
+    number: String,
+    volume: u8,
+) -> Result<(), AppError> {
     if let Some(window) = app.get_webview_window("incoming-call") {
         window
             .show()
@@ -2443,10 +2448,16 @@ fn show_incoming_call_window(app: tauri::AppHandle) -> Result<(), AppError> {
             y = monitor.position().y as f64 / scale + monitor.size().height as f64 / scale - 226.0;
         }
     }
+    let popup_url = format!(
+        "index.html?incoming-call=1&name={}&number={}&volume={}",
+        urlencoding::encode(&name),
+        urlencoding::encode(&number),
+        volume.min(100)
+    );
     tauri::WebviewWindowBuilder::new(
         &app,
         "incoming-call",
-        tauri::WebviewUrl::App("index.html?incoming-call=1".into()),
+        tauri::WebviewUrl::App(popup_url.into()),
     )
     .title("Eingehender Anruf")
     .inner_size(372.0, 202.0)

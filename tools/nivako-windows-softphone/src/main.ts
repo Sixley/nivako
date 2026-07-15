@@ -13,8 +13,8 @@ import type { CallEntry, Contact, NativeSipSnapshot, Settings, SoftphoneState } 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.2.26";
-const buildLabel = "0.2.26 Desktop-Anrufanzeige";
+const appVersion = "0.2.27";
+const buildLabel = "0.2.27 Anrufsteuerung";
 const incomingCallMode = new URLSearchParams(window.location.search).has("incoming-call");
 const cardDavRefreshMs = 15 * 60 * 1000;
 const sipReconnectMs = 60 * 1000;
@@ -201,10 +201,11 @@ function normalizeCallState(value: string): SoftphoneState["callState"] {
 }
 
 function applyNativeSipSnapshot(snapshot: NativeSipSnapshot): void {
+  const reportedCallState = normalizeCallState(snapshot.call_state);
   const nextState = {
     ...state,
     registered: snapshot.registered,
-    callState: normalizeCallState(snapshot.call_state),
+    callState: snapshot.held ? "held" as const : reportedCallState === "held" ? "active" as const : reportedCallState,
     muted: snapshot.muted
   };
   const remoteNumber = snapshot.remote_number || state.remoteIdentity || "";
@@ -214,7 +215,10 @@ function applyNativeSipSnapshot(snapshot: NativeSipSnapshot): void {
     nextState.remoteIdentity = snapshot.remote_name || remoteNumber || "Unbekannter Anrufer";
     nextState.activeContact = matchedContact;
     document.title = `Eingehender Anruf – ${snapshot.remote_name || matchedContact?.displayName || remoteNumber || "Unbekannt"}`;
-    if (isTauriRuntime()) void showIncomingCallWindow().catch(() => undefined);
+    if (isTauriRuntime()) {
+      const displayName = snapshot.remote_name || matchedContact?.displayName || remoteNumber || "Unbekannter Anrufer";
+      void showIncomingCallWindow(displayName, remoteNumber, settings.ringVolume).catch(() => undefined);
+    }
   } else if (state.callState === "ringing") {
     document.title = "NIVAKO Softphone";
     if (isTauriRuntime()) void closeIncomingCallWindow().catch(() => undefined);
@@ -756,7 +760,8 @@ function render(): void {
           <strong>${escapeHtml(primaryStatusText())}</strong>
           <span>${escapeHtml(serviceLine())}</span>
         </div>
-        <div class="call-card">
+        <div class="call-card ${state.callState === "ringing" ? "call-card-ringing" : ""}">
+          ${state.callState === "ringing" ? `<div class="in-app-incoming"><span>☎ Eingehender Anruf</span><strong>${escapeHtml(state.activeContact?.displayName || state.remoteIdentity || state.activeNumber || "Unbekannt")}</strong><small>${escapeHtml(state.activeNumber || "Nummer unterdrueckt")}</small></div>` : ""}
           <div class="status-line">
             <span class="status-dot ${state.registered ? "" : "offline"}"></span>
             <span>${telephonyStatusText()}</span>
@@ -772,7 +777,7 @@ function render(): void {
           <div class="call-actions">
             <button class="secondary" id="register-sip" ${settings.enableWebRtcSip || canUseNativeTelephony() ? "" : "disabled"}>Registrieren</button>
             <button class="primary" id="dial" ${!state.activeNumber && state.callState !== "ringing" ? "disabled" : ""}>${state.callState === "ringing" ? "Annehmen" : settings.safeCallMode ? "Lokal erfassen" : "Anrufen"}</button>
-            <button class="danger" id="hangup" ${state.callState === "idle" ? "disabled" : ""}>Auflegen</button>
+            <button class="danger" id="hangup" ${state.callState === "idle" ? "disabled" : ""}>${state.callState === "ringing" ? "Ablehnen" : "Auflegen"}</button>
           </div>
           <div class="call-actions compact-actions">
             <button class="secondary" id="backspace" ${!state.activeNumber ? "disabled" : ""}>Rueck</button>
@@ -945,8 +950,9 @@ function playPopupRingPulse(volume: number): void {
   const now = ringtoneContext.currentTime;
   const gain = ringtoneContext.createGain();
   gain.gain.setValueAtTime(0, now);
-  gain.gain.linearRampToValueAtTime(volume / 450, now + 0.03);
-  gain.gain.setValueAtTime(volume / 450, now + 0.65);
+  const audibleGain = (volume / 100) * 0.55;
+  gain.gain.linearRampToValueAtTime(audibleGain, now + 0.03);
+  gain.gain.setValueAtTime(audibleGain, now + 0.65);
   gain.gain.linearRampToValueAtTime(0, now + 0.8);
   gain.connect(ringtoneContext.destination);
   for (const frequency of [440, 520]) {
@@ -960,7 +966,16 @@ function playPopupRingPulse(volume: number): void {
 
 async function bootIncomingCallPopup(): Promise<void> {
   document.body.classList.add("incoming-popup-page");
-  const volume = Math.max(0, Math.min(100, loadSettings(defaultSettings).ringVolume ?? 75));
+  const popupParams = new URLSearchParams(window.location.search);
+  const volume = Math.max(0, Math.min(100, Number(popupParams.get("volume") ?? loadSettings(defaultSettings).ringVolume ?? 75)));
+  const initialNumber = popupParams.get("number") || "Nummer unterdrueckt";
+  const initialName = popupParams.get("name") || initialNumber || "Unbekannter Anrufer";
+  const renderPopup = (name: string, number: string): void => {
+    root.innerHTML = `<main class="desktop-call-popup"><div class="desktop-call-symbol">☎</div><div><span>Eingehender Anruf</span><strong>${escapeHtml(name)}</strong><small>${escapeHtml(number)}</small></div><div class="desktop-call-actions"><button class="primary" id="popup-accept">Annehmen</button><button class="danger" id="popup-reject">Ablehnen</button></div></main>`;
+    document.querySelector<HTMLButtonElement>("#popup-accept")?.addEventListener("click", async () => { stopPopupRingtone(); try { await acceptNative(); } finally { window.close(); } });
+    document.querySelector<HTMLButtonElement>("#popup-reject")?.addEventListener("click", async () => { stopPopupRingtone(); try { await hangupNative(); } finally { window.close(); } });
+  };
+  renderPopup(initialName, initialNumber);
   try {
     ringtoneContext = new AudioContext();
     playPopupRingPulse(volume);
@@ -972,11 +987,9 @@ async function bootIncomingCallPopup(): Promise<void> {
     const number = snapshot.remote_number || "Nummer unterdrueckt";
     const matched = contacts.find((contact) => contact.phones.some((phone) => phone.normalized === number || phone.raw === number));
     const name = matched?.displayName || snapshot.remote_name || number || "Unbekannter Anrufer";
-    root.innerHTML = `<main class="desktop-call-popup"><div class="desktop-call-symbol">☎</div><div><span>Eingehender Anruf</span><strong>${escapeHtml(name)}</strong><small>${escapeHtml(number)}</small></div><div class="desktop-call-actions"><button class="primary" id="popup-accept">Annehmen</button><button class="danger" id="popup-reject">Ablehnen</button></div></main>`;
-    document.querySelector<HTMLButtonElement>("#popup-accept")?.addEventListener("click", async () => { stopPopupRingtone(); await acceptNative(); window.close(); });
-    document.querySelector<HTMLButtonElement>("#popup-reject")?.addEventListener("click", async () => { stopPopupRingtone(); await hangupNative(); window.close(); });
+    renderPopup(name, number);
   };
-  await refresh();
+  await refresh().catch(() => undefined);
   window.setInterval(() => void refresh().catch(() => undefined), 700);
 }
 
