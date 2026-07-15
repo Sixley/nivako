@@ -1056,9 +1056,12 @@ fn configure_linphone_codecs(core: *mut LinphoneCore) -> String {
             let channels = unsafe { linphone_payload_type_get_channels(payload) };
             let number = unsafe { linphone_payload_type_get_number(payload) };
             let mime_upper = mime.to_ascii_uppercase();
+            // Keep the proven 0.2.24 media profile. G.722 was enabled in
+            // 0.2.26 and immediately correlated with one-way transmit audio
+            // on the Windows build, so it must stay disabled until it has a
+            // separate end-to-end media test.
             let keep =
-                (matches!(mime_upper.as_str(), "PCMA" | "PCMU") && rate == 8000 && channels <= 1)
-                    || (mime_upper == "G722" && rate == 8000 && channels <= 1);
+                matches!(mime_upper.as_str(), "PCMA" | "PCMU") && rate == 8000 && channels <= 1;
             let _ = unsafe { linphone_payload_type_enable(payload, if keep { 1 } else { 0 }) };
 
             let label = format!("{mime}/{rate}/{channels} pt={number}");
@@ -1153,7 +1156,7 @@ fn set_sip_snapshot(snapshot: NativeSipSnapshot) {
     }
 }
 
-fn session_snapshot(session: &LinphoneSession, message: String) -> NativeSipSnapshot {
+fn session_snapshot(session: &mut LinphoneSession, message: String) -> NativeSipSnapshot {
     let (registered, registration_label) = if !session.account.is_null() {
         account_registration_state(session.account)
     } else {
@@ -1163,9 +1166,11 @@ fn session_snapshot(session: &LinphoneSession, message: String) -> NativeSipSnap
         .map(|event| format!(" {event}."))
         .unwrap_or_default();
     let (remote_name, remote_number) = current_remote_identity(session.core);
+    let current_call_state = call_state(session.core);
+    session.held = current_call_state == "held";
     NativeSipSnapshot {
         registered,
-        call_state: call_state(session.core),
+        call_state: current_call_state,
         provider: "liblinphone".to_string(),
         message: format!(
             "{message}{call_event} SIP-Status: {registration_label}. {}",
@@ -2297,7 +2302,8 @@ fn sip_hold() -> Result<NativeSipStatus, AppError> {
                 "Kein aktiver Anruf zum Halten".to_string(),
             ));
         }
-        let status = if session.held {
+        let was_held = call_state(session.core) == "held";
+        let status = if was_held {
             unsafe { linphone_core_resume_call(session.core, call) }
         } else {
             unsafe { linphone_core_pause_call(session.core, call) }
@@ -2307,14 +2313,15 @@ fn sip_hold() -> Result<NativeSipStatus, AppError> {
                 "Halten/Fortsetzen wurde von liblinphone abgelehnt".to_string(),
             ));
         }
-        session.held = !session.held;
-        tick_core_for(session.core, 5, 80);
+        tick_core_for(session.core, 10, 80);
+        let resulting_state = call_state(session.core);
+        session.held = resulting_state == "held";
         let snapshot = session_snapshot(
             session,
-            if session.held {
-                "Anruf gehalten.".to_string()
-            } else {
+            if was_held {
                 "Anruf fortgesetzt.".to_string()
+            } else {
+                "Anruf gehalten.".to_string()
             },
         );
         set_sip_snapshot(snapshot.clone());
@@ -2449,7 +2456,7 @@ fn show_incoming_call_window(
         }
     }
     let popup_url = format!(
-        "index.html?incoming-call=1&name={}&number={}&volume={}",
+        "incoming.html?name={}&number={}&volume={}",
         urlencoding::encode(&name),
         urlencoding::encode(&number),
         volume.min(100)

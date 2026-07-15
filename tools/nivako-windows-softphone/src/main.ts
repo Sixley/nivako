@@ -3,7 +3,7 @@ import brandLogoUrl from "./assets/nivako-softphone-logo.png";
 import { loadAudioDevices, type AudioDeviceState } from "./audioDevices";
 import { parseManyVCards } from "./carddav";
 import { syncCardDavContacts } from "./contactsRepository";
-import { acceptNative, closeIncomingCallWindow, getLastCardDavDiagnostic, getSipStatusNative, hangupNative, hasSecretNative, isTauriRuntime, loadSecretNative, saveSecretNative, showIncomingCallWindow } from "./nativeBridge";
+import { closeIncomingCallWindow, getLastCardDavDiagnostic, getSipStatusNative, hasSecretNative, isTauriRuntime, loadSecretNative, saveSecretNative, showIncomingCallWindow } from "./nativeBridge";
 import { canUseNativeTelephony, NativeTelephonyAdapter } from "./nativeTelephony";
 import { searchContacts } from "./search";
 import { loadContacts, loadFavoriteIds, loadHistory, loadSettings, saveContacts, saveFavoriteIds, saveHistory, saveSettings } from "./storage";
@@ -13,9 +13,8 @@ import type { CallEntry, Contact, NativeSipSnapshot, Settings, SoftphoneState } 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.2.27";
-const buildLabel = "0.2.27 Anrufsteuerung";
-const incomingCallMode = new URLSearchParams(window.location.search).has("incoming-call");
+const appVersion = "0.2.28";
+const buildLabel = "0.2.28 Stabiler Rufzustand";
 const cardDavRefreshMs = 15 * 60 * 1000;
 const sipReconnectMs = 60 * 1000;
 const sipStatusPollMs = 2000;
@@ -411,16 +410,35 @@ async function dial(): Promise<void> {
 }
 
 async function hangup(): Promise<void> {
-  await telephony.hangup();
+  const wasRinging = state.callState === "ringing";
+  state = { ...state, callState: "idle", activeNumber: "", activeContact: undefined, muted: false };
+  notice = wasRinging ? "Anruf wird abgelehnt." : "Anruf wird beendet.";
+  render();
+  try {
+    await telephony.hangup();
+  } catch (error) {
+    notice = errorMessage(error, wasRinging ? "Anruf konnte nicht abgelehnt werden" : "Anruf konnte nicht beendet werden");
+    render();
+    return;
+  }
   state = { ...state, callState: "idle", activeNumber: "", activeContact: undefined };
-  notice = "Anruf beendet.";
+  notice = wasRinging ? "Anruf abgelehnt." : "Anruf beendet.";
   render();
 }
 
 async function holdCall(): Promise<void> {
-  await telephony.hold();
-  state = { ...state, callState: state.callState === "held" ? "active" : "held" };
-  notice = state.callState === "held" ? "Anruf gehalten." : "Anruf fortgesetzt.";
+  const resume = state.callState === "held";
+  notice = resume ? "Anruf wird fortgesetzt." : "Anruf wird gehalten.";
+  render();
+  try {
+    await telephony.hold();
+  } catch (error) {
+    notice = errorMessage(error, resume ? "Anruf konnte nicht fortgesetzt werden" : "Anruf konnte nicht gehalten werden");
+    render();
+    return;
+  }
+  state = { ...state, callState: resume ? "active" : "held" };
+  notice = resume ? "Anruf fortgesetzt." : "Anruf gehalten.";
   render();
 }
 
@@ -935,63 +953,4 @@ async function boot(): Promise<void> {
   await startDesktopServices();
 }
 
-let ringtoneContext: AudioContext | undefined;
-let ringtoneTimer: number | undefined;
-
-function stopPopupRingtone(): void {
-  if (ringtoneTimer !== undefined) window.clearInterval(ringtoneTimer);
-  ringtoneTimer = undefined;
-  void ringtoneContext?.close();
-  ringtoneContext = undefined;
-}
-
-function playPopupRingPulse(volume: number): void {
-  if (volume <= 0 || !ringtoneContext) return;
-  const now = ringtoneContext.currentTime;
-  const gain = ringtoneContext.createGain();
-  gain.gain.setValueAtTime(0, now);
-  const audibleGain = (volume / 100) * 0.55;
-  gain.gain.linearRampToValueAtTime(audibleGain, now + 0.03);
-  gain.gain.setValueAtTime(audibleGain, now + 0.65);
-  gain.gain.linearRampToValueAtTime(0, now + 0.8);
-  gain.connect(ringtoneContext.destination);
-  for (const frequency of [440, 520]) {
-    const oscillator = ringtoneContext.createOscillator();
-    oscillator.frequency.value = frequency;
-    oscillator.connect(gain);
-    oscillator.start(now);
-    oscillator.stop(now + 0.82);
-  }
-}
-
-async function bootIncomingCallPopup(): Promise<void> {
-  document.body.classList.add("incoming-popup-page");
-  const popupParams = new URLSearchParams(window.location.search);
-  const volume = Math.max(0, Math.min(100, Number(popupParams.get("volume") ?? loadSettings(defaultSettings).ringVolume ?? 75)));
-  const initialNumber = popupParams.get("number") || "Nummer unterdrueckt";
-  const initialName = popupParams.get("name") || initialNumber || "Unbekannter Anrufer";
-  const renderPopup = (name: string, number: string): void => {
-    root.innerHTML = `<main class="desktop-call-popup"><div class="desktop-call-symbol">☎</div><div><span>Eingehender Anruf</span><strong>${escapeHtml(name)}</strong><small>${escapeHtml(number)}</small></div><div class="desktop-call-actions"><button class="primary" id="popup-accept">Annehmen</button><button class="danger" id="popup-reject">Ablehnen</button></div></main>`;
-    document.querySelector<HTMLButtonElement>("#popup-accept")?.addEventListener("click", async () => { stopPopupRingtone(); try { await acceptNative(); } finally { window.close(); } });
-    document.querySelector<HTMLButtonElement>("#popup-reject")?.addEventListener("click", async () => { stopPopupRingtone(); try { await hangupNative(); } finally { window.close(); } });
-  };
-  renderPopup(initialName, initialNumber);
-  try {
-    ringtoneContext = new AudioContext();
-    playPopupRingPulse(volume);
-    ringtoneTimer = window.setInterval(() => playPopupRingPulse(volume), 2200);
-  } catch { /* WebView kann Audio bis zur ersten Interaktion sperren. */ }
-  const refresh = async (): Promise<void> => {
-    const snapshot = await getSipStatusNative();
-    if (normalizeCallState(snapshot.call_state) !== "ringing") { stopPopupRingtone(); window.close(); return; }
-    const number = snapshot.remote_number || "Nummer unterdrueckt";
-    const matched = contacts.find((contact) => contact.phones.some((phone) => phone.normalized === number || phone.raw === number));
-    const name = matched?.displayName || snapshot.remote_name || number || "Unbekannter Anrufer";
-    renderPopup(name, number);
-  };
-  await refresh().catch(() => undefined);
-  window.setInterval(() => void refresh().catch(() => undefined), 700);
-}
-
-if (incomingCallMode) void bootIncomingCallPopup();
-else void boot();
+void boot();
