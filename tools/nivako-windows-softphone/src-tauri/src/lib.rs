@@ -184,6 +184,10 @@ extern "C" {
         account: *mut LinphoneAccount,
     );
     fn linphone_call_params_enable_audio(params: *mut LinphoneCallParams, enable: bool_t);
+    fn linphone_call_params_set_audio_direction(
+        params: *mut LinphoneCallParams,
+        direction: c_int,
+    );
     fn linphone_call_params_enable_video(params: *mut LinphoneCallParams, enable: bool_t);
     fn linphone_core_invite_address_with_params(
         core: *mut LinphoneCore,
@@ -1071,8 +1075,10 @@ fn configure_linphone_audio(core: *mut LinphoneCore) -> String {
         linphone_core_set_playback_gain_db(core, 0.0);
         linphone_core_enable_video_capture(core, 0);
         linphone_core_enable_video_display(core, 0);
-        linphone_core_set_download_bandwidth(core, 64);
-        linphone_core_set_upload_bandwidth(core, 64);
+        // Zero means unrestricted. Capping the core at exactly 64 kbit/s can
+        // leave no usable budget for a G.711 stream and its RTP overhead.
+        linphone_core_set_download_bandwidth(core, 0);
+        linphone_core_set_upload_bandwidth(core, 0);
         linphone_core_enable_adaptive_rate_control(core, 1);
         linphone_core_set_audio_jittcomp(core, 80);
         linphone_core_set_audio_port(core, -1);
@@ -2117,6 +2123,10 @@ fn sip_dial(
                 linphone_call_params_set_account(params, session.account);
             }
             linphone_call_params_enable_audio(params, 1);
+            // LinphoneMediaDirectionSendRecv = 3. Audio being enabled alone
+            // did not override the inactive direction inherited by the fresh
+            // call params, resulting in `m=audio 0` / `a=inactive` on the wire.
+            linphone_call_params_set_audio_direction(params, 3);
             linphone_call_params_enable_video(params, 0);
             let call = linphone_core_invite_address_with_params(session.core, address, params);
             linphone_call_params_unref(params);
