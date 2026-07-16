@@ -13,8 +13,8 @@ import type { CallEntry, Contact, NativeSipSnapshot, Settings, SoftphoneState } 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.2.29";
-const buildLabel = "0.2.29 Stabilitaets-Rollback";
+const appVersion = "0.2.30";
+const buildLabel = "0.2.30 Eingehende Anrufsteuerung";
 const cardDavRefreshMs = 15 * 60 * 1000;
 const sipReconnectMs = 60 * 1000;
 const sipStatusPollMs = 2000;
@@ -199,20 +199,31 @@ function normalizeCallState(value: string): SoftphoneState["callState"] {
 }
 
 function applyNativeSipSnapshot(snapshot: NativeSipSnapshot): void {
+  const remoteNumber = snapshot.remote_number?.trim() || "";
+  const remoteContact = remoteNumber
+    ? contacts.find((contact) => contact.phones.some((phone) => phone.normalized === remoteNumber || phone.raw === remoteNumber))
+    : undefined;
   const nextState = {
     ...state,
     registered: snapshot.registered,
     callState: normalizeCallState(snapshot.call_state),
-    muted: snapshot.muted
+    muted: snapshot.muted,
+    activeNumber: snapshot.call_state !== "idle" && remoteNumber ? remoteNumber : state.activeNumber,
+    activeContact: snapshot.call_state !== "idle" && remoteNumber ? remoteContact : state.activeContact,
+    remoteIdentity: snapshot.remote_display_name?.trim() || remoteNumber || undefined
   };
   if (nextState.callState === "idle") {
     nextState.muted = false;
+    nextState.remoteIdentity = undefined;
   }
   const nextNotice = `${snapshot.provider}: ${snapshot.message}`;
   const changed = sipNotice !== nextNotice
     || state.registered !== nextState.registered
     || state.callState !== nextState.callState
-    || Boolean(state.muted) !== Boolean(nextState.muted);
+    || Boolean(state.muted) !== Boolean(nextState.muted)
+    || state.activeNumber !== nextState.activeNumber
+    || state.activeContact?.id !== nextState.activeContact?.id
+    || state.remoteIdentity !== nextState.remoteIdentity;
 
   if (!changed) return;
 
@@ -338,7 +349,6 @@ function addHistory(direction: CallEntry["direction"], number: string, name = nu
 }
 
 async function dial(): Promise<void> {
-  if (!state.activeNumber) return;
   if (state.callState === "ringing" && telephony.accept) {
     state = { ...state, callState: "active" };
     notice = "Eingehender Anruf wird angenommen.";
@@ -353,6 +363,7 @@ async function dial(): Promise<void> {
     render();
     return;
   }
+  if (!state.activeNumber) return;
   const realSipTelephony = settings.enableWebRtcSip || canUseNativeTelephony();
   if (settings.safeCallMode) {
     notice = "Anrufschutz aktiv: Es wurde kein echter Anruf gestartet.";
@@ -393,6 +404,14 @@ async function dial(): Promise<void> {
 }
 
 async function hangup(): Promise<void> {
+  if (state.callState === "ringing" && telephony.reject) {
+    await telephony.reject();
+    addHistory("missed", state.activeNumber || "eingehend", state.remoteIdentity || state.activeNumber || "Eingehender Anruf", "completed");
+    state = { ...state, callState: "idle", activeNumber: "", activeContact: undefined, remoteIdentity: undefined };
+    notice = "Eingehender Anruf abgelehnt.";
+    render();
+    return;
+  }
   await telephony.hangup();
   state = { ...state, callState: "idle", activeNumber: "", activeContact: undefined };
   notice = "Anruf beendet.";
@@ -401,8 +420,9 @@ async function hangup(): Promise<void> {
 
 async function holdCall(): Promise<void> {
   await telephony.hold();
-  state = { ...state, callState: state.callState === "held" ? "active" : "held" };
-  notice = state.callState === "held" ? "Anruf gehalten." : "Anruf fortgesetzt.";
+  const snapshot = await getSipStatusNative();
+  applyNativeSipSnapshot(snapshot);
+  notice = snapshot.held ? "Anruf gehalten." : "Anruf fortgesetzt.";
   render();
 }
 
@@ -747,7 +767,7 @@ function render(): void {
             <span>${telephonyStatusText()}</span>
           </div>
           <div class="callee">
-            <strong>${escapeHtml(state.activeContact?.displayName || state.activeNumber || "Nummer waehlen")}</strong>
+            <strong>${escapeHtml(state.activeContact?.displayName || state.remoteIdentity || state.activeNumber || "Nummer waehlen")}</strong>
             <small>${escapeHtml(state.activeContact?.organization || state.activeNumber || settings.sipServer)}</small>
           </div>
           <input class="number-input" id="number-input" value="${escapeHtml(state.activeNumber)}" placeholder="+49..." />
@@ -757,7 +777,7 @@ function render(): void {
           <div class="call-actions">
             <button class="secondary" id="register-sip" ${settings.enableWebRtcSip || canUseNativeTelephony() ? "" : "disabled"}>Registrieren</button>
             <button class="primary" id="dial" ${!state.activeNumber && state.callState !== "ringing" ? "disabled" : ""}>${state.callState === "ringing" ? "Annehmen" : settings.safeCallMode ? "Lokal erfassen" : "Anrufen"}</button>
-            <button class="danger" id="hangup" ${state.callState === "idle" ? "disabled" : ""}>Auflegen</button>
+            <button class="danger" id="hangup" ${state.callState === "idle" ? "disabled" : ""}>${state.callState === "ringing" ? "Ablehnen" : "Auflegen"}</button>
           </div>
           <div class="call-actions compact-actions">
             <button class="secondary" id="backspace" ${!state.activeNumber ? "disabled" : ""}>Rueck</button>

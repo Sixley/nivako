@@ -2,6 +2,7 @@ export interface TelephonyAdapter {
   register(): Promise<void>;
   dial(number: string): Promise<void>;
   accept?(): Promise<void>;
+  reject?(): Promise<void>;
   hangup(): Promise<void>;
   hold(): Promise<void>;
   mute?(): Promise<void>;
@@ -37,6 +38,10 @@ export class SafeTelephonyAdapter implements TelephonyAdapter {
   }
 
   async accept(): Promise<void> {
+    await Promise.resolve();
+  }
+
+  async reject(): Promise<void> {
     await Promise.resolve();
   }
 

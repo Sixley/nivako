@@ -62,4 +62,6 @@ export interface NativeSipSnapshot {
   message: string;
   held: boolean;
   muted: boolean;
+  remote_number: string;
+  remote_display_name: string;
 }
