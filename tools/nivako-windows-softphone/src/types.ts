@@ -48,6 +48,7 @@ export interface Settings {
   enableWebRtcSip: boolean;
   selectedMicrophoneId: string;
   selectedSpeakerId: string;
+  launchAtStartup: boolean;
 }
 
 export interface NativeSipStatus {

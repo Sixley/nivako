@@ -2460,6 +2460,56 @@ fn hide_incoming_window(app: tauri::AppHandle) {
     }
 }
 
+const WINDOWS_RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+const WINDOWS_RUN_VALUE: &str = "NIVAKO Softphone";
+
+#[tauri::command]
+fn get_autostart() -> Result<bool, AppError> {
+    #[cfg(target_os = "windows")]
+    {
+        let status = Command::new("reg")
+            .args(["query", WINDOWS_RUN_KEY, "/v", WINDOWS_RUN_VALUE])
+            .status()
+            .map_err(|error| AppError::Message(format!("Autostartstatus konnte nicht gelesen werden: {error}")))?;
+        Ok(status.success())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(false)
+    }
+}
+
+#[tauri::command]
+fn set_autostart(enabled: bool) -> Result<(), AppError> {
+    #[cfg(target_os = "windows")]
+    {
+        let status = if enabled {
+            let executable = std::env::current_exe().map_err(|error| {
+                AppError::Message(format!("Programmpfad konnte nicht ermittelt werden: {error}"))
+            })?;
+            let command = format!("\"{}\"", executable.display());
+            Command::new("reg")
+                .args(["add", WINDOWS_RUN_KEY, "/v", WINDOWS_RUN_VALUE, "/t", "REG_SZ", "/d", &command, "/f"])
+                .status()
+        } else {
+            Command::new("reg")
+                .args(["delete", WINDOWS_RUN_KEY, "/v", WINDOWS_RUN_VALUE, "/f"])
+                .status()
+        }
+        .map_err(|error| AppError::Message(format!("Autostart konnte nicht geändert werden: {error}")))?;
+
+        if !status.success() && (enabled || get_autostart()?) {
+            return Err(AppError::Message("Windows hat die Autostartänderung abgelehnt.".to_string()));
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = enabled;
+        Ok(())
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
@@ -2519,7 +2569,9 @@ pub fn run() {
             sip_mute,
             sip_dtmf,
             show_incoming_window,
-            hide_incoming_window
+            hide_incoming_window,
+            get_autostart,
+            set_autostart
         ])
         .run(tauri::generate_context!())
         .expect("error while running NIVAKO Softphone");

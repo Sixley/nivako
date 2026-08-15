@@ -13,7 +13,7 @@ import type { CallEntry, Contact, NativeSipSnapshot, Settings, SoftphoneState } 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.2.35";
+const appVersion = "0.3.0";
 const cardDavRefreshMs = 15 * 60 * 1000;
 const sipReconnectMs = 60 * 1000;
 const sipStatusPollMs = 2000;
@@ -33,7 +33,8 @@ const defaultSettings: Settings = {
   useTelLinks: false,
   enableWebRtcSip: false,
   selectedMicrophoneId: "",
-  selectedSpeakerId: ""
+  selectedSpeakerId: "",
+  launchAtStartup: false
 };
 
 let settings = loadSettings(defaultSettings);
@@ -708,6 +709,8 @@ function renderSettingsModal(): string {
       </form>
       <h2>Konten</h2>
       <form class="settings-list compact-settings" id="settings-form">
+        <h2>App-Verhalten</h2>
+        <label class="check-row"><input type="checkbox" name="launchAtStartup" ${settings.launchAtStartup ? "checked" : ""} /><span>Softphone automatisch mit Windows starten</span></label>
         <label><span>CardDAV URL</span><input name="cardDavUrl" value="${escapeHtml(settings.cardDavUrl)}" /></label>
         <label><span>CardDAV Benutzer</span><input name="cardDavUser" value="${escapeHtml(settings.cardDavUser)}" /></label>
         <label><span>CardDAV Passwort ${isTauriRuntime() && hasStoredCardDavPassword ? "(gespeichert)" : ""}</span><input name="cardDavPassword" type="password" value="${escapeHtml(cardDavPassword)}" autocomplete="off" /></label>
@@ -899,12 +902,17 @@ function bindEvents(): void {
       useTelLinks: form.get("useTelLinks") === "on",
       enableWebRtcSip: form.get("enableWebRtcSip") === "on",
       selectedMicrophoneId: settings.selectedMicrophoneId,
-      selectedSpeakerId: settings.selectedSpeakerId
+      selectedSpeakerId: settings.selectedSpeakerId,
+      launchAtStartup: form.get("launchAtStartup") === "on"
     };
     cardDavPassword = String(form.get("cardDavPassword") || "");
     sipPassword = String(form.get("sipPassword") || "");
     saveSettings(settings);
     try {
+      if (isTauriRuntime()) {
+        const api = await import("@tauri-apps/api/core");
+        await api.invoke("set_autostart", { enabled: settings.launchAtStartup });
+      }
       await saveEnteredSecrets();
       await updateCredentialState();
       configureTelephony();
@@ -937,6 +945,15 @@ function bindEvents(): void {
 }
 
 async function boot(): Promise<void> {
+  if (isTauriRuntime()) {
+    try {
+      const api = await import("@tauri-apps/api/core");
+      settings = { ...settings, launchAtStartup: await api.invoke<boolean>("get_autostart") };
+      saveSettings(settings);
+    } catch {
+      // Die App bleibt auch nutzbar, wenn Windows den Autostartstatus nicht lesen kann.
+    }
+  }
   configureTelephony();
   render();
   await updateCredentialState();
