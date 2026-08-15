@@ -28,6 +28,16 @@ END:VCARD`, "/contact/test.vcf");
     expect(contact.phones[0].label).toBe("mobile");
     expect(contact.phones[0].normalized).toBe("+4930123456");
   });
+
+  it("extracts embedded contact photos", () => {
+    const contact = parseVCard(`BEGIN:VCARD
+VERSION:3.0
+FN:Kontakt mit Bild
+PHOTO;ENCODING=b;TYPE=PNG:aGVsbG8=
+TEL:+491234
+END:VCARD`);
+    expect(contact.photoUrl).toBe("data:image/png;base64,aGVsbG8=");
+  });
 });
 
 describe("contact search", () => {

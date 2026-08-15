@@ -113,3 +113,7 @@ export async function muteNative(muted: boolean): Promise<NativeSipStatus> {
 export async function sendDtmfNative(digit: string): Promise<NativeSipStatus> {
   return tauriInvokeWithTimeout<NativeSipStatus>("sip_dtmf", { digit }, nativeSipTimeoutMs, "DTMF antwortet nicht innerhalb von 15 Sekunden.");
 }
+
+export async function transferNative(target: string): Promise<NativeSipStatus> {
+  return tauriInvokeWithTimeout<NativeSipStatus>("sip_transfer", { target }, nativeSipTimeoutMs, "Weiterleitung antwortet nicht innerhalb von 15 Sekunden.");
+}

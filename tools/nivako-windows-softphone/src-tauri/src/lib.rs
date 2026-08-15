@@ -228,6 +228,7 @@ extern "C" {
     fn linphone_core_terminate_all_calls(core: *mut LinphoneCore) -> c_int;
     fn linphone_core_pause_call(core: *mut LinphoneCore, call: *mut LinphoneCall) -> c_int;
     fn linphone_core_resume_call(core: *mut LinphoneCore, call: *mut LinphoneCall) -> c_int;
+    fn linphone_call_transfer_to(call: *mut LinphoneCall, refer_to: *const c_char) -> c_int;
     fn linphone_core_enable_mic(core: *mut LinphoneCore, enable: bool_t);
     fn linphone_call_send_dtmf(call: *mut LinphoneCall, dtmf: c_char) -> c_int;
     fn ms_factory_set_plugins_dir(factory: *mut MSFactory, path: *const c_char);
@@ -273,6 +274,7 @@ static SIP_SNAPSHOT: Lazy<Arc<Mutex<NativeSipSnapshot>>> = Lazy::new(|| {
     }))
 });
 static SIP_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
+static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(true);
 static SIP_SIDECAR: Lazy<Arc<Mutex<Option<SipSidecarClient>>>> =
     Lazy::new(|| Arc::new(Mutex::new(None)));
 static SIP_LAST_CALL_EVENT: Lazy<Arc<Mutex<Option<String>>>> =
@@ -303,6 +305,9 @@ enum SipSidecarCommand {
     },
     Dtmf {
         digit: String,
+    },
+    Transfer {
+        target: String,
     },
 }
 
@@ -1820,6 +1825,10 @@ fn sidecar_reply(command: SipSidecarCommand) -> SipSidecarReply {
                 message: error.to_string(),
             },
         },
+        SipSidecarCommand::Transfer { target } => match sip_transfer(target) {
+            Ok(status) => SipSidecarReply::Status { status },
+            Err(error) => SipSidecarReply::Error { message: error.to_string() },
+        },
     }
 }
 
@@ -2364,6 +2373,34 @@ fn sip_hold() -> Result<NativeSipStatus, AppError> {
 }
 
 #[tauri::command]
+fn sip_transfer(target: String) -> Result<NativeSipStatus, AppError> {
+    if !is_sip_sidecar_process() {
+        return match sip_sidecar_call(SipSidecarCommand::Transfer { target })? {
+            SipSidecarReply::Status { status } => Ok(status),
+            SipSidecarReply::Error { message } => Err(AppError::Message(message)),
+            SipSidecarReply::Snapshot { snapshot } => Ok(NativeSipStatus { registered: snapshot.registered, message: snapshot.message }),
+        };
+    }
+    with_session(|session| {
+        let call = unsafe { linphone_core_get_current_call(session.core) };
+        if call.is_null() { return Err(AppError::Message("Kein aktiver Anruf zum Weiterleiten".to_string())); }
+        let domain = normalize_domain(&session.sip_server);
+        let destination = if target.trim().to_lowercase().starts_with("sip:") {
+            target.trim().to_string()
+        } else {
+            format!("sip:{}@{}", target.trim(), domain)
+        };
+        let destination = CString::new(destination).map_err(|_| AppError::Message("Ungültiges Weiterleitungsziel".to_string()))?;
+        let status = unsafe { linphone_call_transfer_to(call, destination.as_ptr()) };
+        if status != 0 { return Err(AppError::Message("Weiterleitung wurde von liblinphone abgelehnt".to_string())); }
+        tick_core_for(session.core, 5, 80);
+        let snapshot = session_snapshot(session, "Anruf wird weitergeleitet.".to_string());
+        set_sip_snapshot(snapshot.clone());
+        Ok(NativeSipStatus { registered: snapshot.registered, message: snapshot.message })
+    })
+}
+
+#[tauri::command]
 fn sip_mute(muted: bool) -> Result<NativeSipStatus, AppError> {
     if !is_sip_sidecar_process() {
         return match sip_sidecar_call(SipSidecarCommand::Mute { muted })? {
@@ -2510,6 +2547,11 @@ fn set_autostart(enabled: bool) -> Result<(), AppError> {
     }
 }
 
+#[tauri::command]
+fn set_close_to_tray(enabled: bool) {
+    CLOSE_TO_TRAY.store(enabled, Ordering::Relaxed);
+}
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
@@ -2549,8 +2591,10 @@ pub fn run() {
         .on_window_event(|window, event| {
             if window.label() == "main" {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    let _ = window.hide();
+                    if CLOSE_TO_TRAY.load(Ordering::Relaxed) {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
                 }
             }
         })
@@ -2566,12 +2610,14 @@ pub fn run() {
             sip_reject,
             sip_hangup,
             sip_hold,
+            sip_transfer,
             sip_mute,
             sip_dtmf,
             show_incoming_window,
             hide_incoming_window,
             get_autostart,
-            set_autostart
+            set_autostart,
+            set_close_to_tray
         ])
         .run(tauri::generate_context!())
         .expect("error while running NIVAKO Softphone");

@@ -1,4 +1,4 @@
-import { acceptNative, dialNative, hangupNative, holdNative, isTauriRuntime, muteNative, registerSipNative, rejectNative, sendDtmfNative } from "./nativeBridge";
+import { acceptNative, dialNative, hangupNative, holdNative, isTauriRuntime, muteNative, registerSipNative, rejectNative, sendDtmfNative, transferNative } from "./nativeBridge";
 import type { Settings } from "./types";
 import type { TelephonyAdapter } from "./telephony";
 
@@ -51,6 +51,11 @@ export class NativeTelephonyAdapter implements TelephonyAdapter {
 
   async sendDtmf(digit: string): Promise<void> {
     const result = await sendDtmfNative(digit);
+    this.onStatus(result.message, result.registered);
+  }
+
+  async transfer(target: string): Promise<void> {
+    const result = await transferNative(target);
     this.onStatus(result.message, result.registered);
   }
 }

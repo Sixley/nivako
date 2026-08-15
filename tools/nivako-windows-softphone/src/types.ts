@@ -14,6 +14,7 @@ export interface Contact {
   phones: ContactPhone[];
   favorite?: boolean;
   source?: "carddav" | "local";
+  photoUrl?: string;
 }
 
 export interface CallEntry {
@@ -23,6 +24,7 @@ export interface CallEntry {
   number: string;
   time: string;
   result?: "blocked" | "started" | "failed" | "completed";
+  durationSeconds?: number;
 }
 
 export interface SoftphoneState {
@@ -49,6 +51,8 @@ export interface Settings {
   selectedMicrophoneId: string;
   selectedSpeakerId: string;
   launchAtStartup: boolean;
+  doNotDisturb: boolean;
+  closeToTray: boolean;
 }
 
 export interface NativeSipStatus {

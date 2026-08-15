@@ -53,6 +53,7 @@ export function parseVCard(vcard: string, href: string = crypto.randomUUID()): C
   let lastName = "";
   let organization = "";
   let email = "";
+  let photoUrl = "";
 
   for (const line of lines) {
     const property = getPropertyName(line);
@@ -66,6 +67,13 @@ export function parseVCard(vcard: string, href: string = crypto.randomUUID()): C
     }
     if (property === "ORG") organization = value.split(";").filter(Boolean).join(" / ");
     if (property === "EMAIL" && !email) email = value;
+    if (property === "PHOTO" && !photoUrl) {
+      if (/^https?:\/\//i.test(value) || value.startsWith("data:image/")) photoUrl = value;
+      else if (/^[A-Za-z0-9+/=\s]+$/.test(value)) {
+        const mime = /TYPE=(PNG)/i.test(line) ? "image/png" : "image/jpeg";
+        photoUrl = `data:${mime};base64,${value.replace(/\s/g, "")}`;
+      }
+    }
     if (property === "TEL") {
       phones.push({
         label: phoneLabelFromLine(line),
@@ -82,6 +90,7 @@ export function parseVCard(vcard: string, href: string = crypto.randomUUID()): C
     displayName: displayName || fallbackName || organization || "Unbekannter Kontakt",
     organization: organization || undefined,
     email: email || undefined,
+    photoUrl: photoUrl || undefined,
     phones,
     source: "carddav"
   };

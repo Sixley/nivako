@@ -34,7 +34,9 @@ const defaultSettings: Settings = {
   enableWebRtcSip: false,
   selectedMicrophoneId: "",
   selectedSpeakerId: "",
-  launchAtStartup: false
+  launchAtStartup: false,
+  doNotDisturb: false,
+  closeToTray: true
 };
 
 let settings = loadSettings(defaultSettings);
@@ -103,6 +105,9 @@ let incomingWindowVisible = false;
 let lastToastNotice = notice;
 let toastUntil = 0;
 let toastTimer: number | undefined;
+let callStartedAt: number | undefined;
+let activeHistoryId: string | undefined;
+let dndRejecting = false;
 
 async function setIncomingWindow(visible: boolean): Promise<void> {
   if (!isTauriRuntime() || incomingWindowVisible === visible) return;
@@ -213,8 +218,18 @@ function applyNativeSipSnapshot(snapshot: NativeSipSnapshot): void {
 
   if (!changed) return;
 
+  if (state.callState !== "active" && nextState.callState === "active") callStartedAt = Date.now();
+  if (state.callState === "active" && nextState.callState === "idle") finishActiveHistory();
+
   sipNotice = nextNotice;
   state = nextState;
+  if (settings.doNotDisturb && nextState.callState === "ringing" && !dndRejecting && telephony.reject) {
+    dndRejecting = true;
+    const number = nextState.activeNumber || nextState.remoteIdentity || "eingehend";
+    addHistory("missed", number, nextState.activeContact?.displayName || nextState.remoteIdentity || number, "completed");
+    void telephony.reject().finally(() => { dndRejecting = false; });
+    notice = "Anruf durch Nicht stören abgewiesen.";
+  }
   void setIncomingWindow(nextState.callState === "ringing");
   renderUnlessEditing();
 }
@@ -315,10 +330,11 @@ function setActiveNumber(number: string, contact?: Contact): void {
   render();
 }
 
-function addHistory(direction: CallEntry["direction"], number: string, name = number, result: CallEntry["result"] = "started"): void {
+function addHistory(direction: CallEntry["direction"], number: string, name = number, result: CallEntry["result"] = "started"): string {
+  const id = crypto.randomUUID();
   callHistory = [
     {
-      id: crypto.randomUUID(),
+      id,
       direction,
       name,
       number,
@@ -328,6 +344,21 @@ function addHistory(direction: CallEntry["direction"], number: string, name = nu
     ...callHistory
   ].slice(0, 100);
   saveHistory(callHistory);
+  return id;
+}
+
+function finishActiveHistory(): void {
+  if (!activeHistoryId) return;
+  const durationSeconds = callStartedAt ? Math.max(0, Math.round((Date.now() - callStartedAt) / 1000)) : 0;
+  callHistory = callHistory.map((entry) => entry.id === activeHistoryId ? { ...entry, result: "completed", durationSeconds } : entry);
+  saveHistory(callHistory);
+  activeHistoryId = undefined;
+  callStartedAt = undefined;
+}
+
+function formatDuration(seconds?: number): string {
+  if (seconds === undefined) return "";
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
 async function dial(): Promise<void> {
@@ -337,7 +368,8 @@ async function dial(): Promise<void> {
     render();
     try {
       await telephony.accept();
-      addHistory("inbound", state.activeNumber || "eingehend", state.activeContact?.displayName || state.activeNumber || "Eingehender Anruf", "started");
+      activeHistoryId = addHistory("inbound", state.activeNumber || "eingehend", state.activeContact?.displayName || state.activeNumber || "Eingehender Anruf", "started");
+      callStartedAt = Date.now();
     } catch (error) {
       notice = errorMessage(error, "Anruf konnte nicht angenommen werden");
       state = { ...state, callState: "idle" };
@@ -366,7 +398,7 @@ async function dial(): Promise<void> {
   render();
   try {
     await telephony.dial(state.activeNumber);
-    addHistory("outbound", state.activeNumber, state.activeContact?.displayName || state.activeNumber, "started");
+    activeHistoryId = addHistory("outbound", state.activeNumber, state.activeContact?.displayName || state.activeNumber, "started");
     if (canUseNativeTelephony() && !settings.enableWebRtcSip) {
       notice = "Anruf wird aufgebaut.";
     } else {
@@ -395,6 +427,7 @@ async function hangup(): Promise<void> {
     return;
   }
   await telephony.hangup();
+  finishActiveHistory();
   state = { ...state, callState: "idle", activeNumber: "", activeContact: undefined };
   notice = "Anruf beendet.";
   render();
@@ -416,6 +449,33 @@ async function toggleMute(): Promise<void> {
   }
   state = { ...state, muted: !state.muted };
   notice = state.muted ? "Mikrofon stumm." : "Mikrofon aktiv.";
+  render();
+}
+
+async function transferCall(): Promise<void> {
+  if (!telephony.transfer) return;
+  const target = window.prompt("An welche Nummer soll der Anruf weitergeleitet werden?")?.trim();
+  if (!target) return;
+  try {
+    await telephony.transfer(target);
+    notice = `Anruf wird an ${target} weitergeleitet.`;
+  } catch (error) {
+    notice = errorMessage(error, "Weiterleitung fehlgeschlagen");
+  }
+  render();
+}
+
+async function startSecondCall(): Promise<void> {
+  const target = window.prompt("Nummer für den zweiten Anruf")?.trim();
+  if (!target) return;
+  try {
+    if (state.callState === "active") await telephony.hold();
+    await telephony.dial(target);
+    activeHistoryId = addHistory("outbound", target, contacts.find((contact) => contact.phones.some((phone) => phone.normalized === target || phone.raw === target))?.displayName || target, "started");
+    notice = `Zweiter Anruf wird zu ${target} aufgebaut.`;
+  } catch (error) {
+    notice = errorMessage(error, "Zweiter Anruf konnte nicht aufgebaut werden");
+  }
   render();
 }
 
@@ -547,7 +607,7 @@ function renderContact(contact: Contact): string {
     <div class="contact-row">
       <div class="contact-body">
         <button class="contact-select" data-number="${escapeHtml(primaryPhone?.normalized || "")}" data-contact="${escapeHtml(contact.id)}">
-          <span class="avatar">${escapeHtml(initials || "?")}</span>
+          <span class="avatar">${contact.photoUrl ? `<img src="${escapeHtml(contact.photoUrl)}" alt="" />` : escapeHtml(initials || "?")}</span>
           <span class="contact-main">
             <strong>${escapeHtml(contact.displayName)}</strong>
             <small>${escapeHtml(details)}</small>
@@ -575,7 +635,7 @@ function renderHistoryList(emptyText: string): string {
             <strong>${escapeHtml(entry.name)}</strong>
             <small>${escapeHtml(entry.number)}</small>
           </span>
-          <small class="history-meta">${escapeHtml(entry.result || "")} · ${escapeHtml(entry.time)}</small>
+          <small class="history-meta">${escapeHtml(entry.result || "")}${entry.durationSeconds !== undefined ? ` · ${formatDuration(entry.durationSeconds)}` : ""} · ${escapeHtml(entry.time)}</small>
         </button>
       `).join("")}
     </div>
@@ -711,6 +771,8 @@ function renderSettingsModal(): string {
       <form class="settings-list compact-settings" id="settings-form">
         <h2>App-Verhalten</h2>
         <label class="check-row"><input type="checkbox" name="launchAtStartup" ${settings.launchAtStartup ? "checked" : ""} /><span>Softphone automatisch mit Windows starten</span></label>
+        <label class="check-row"><input type="checkbox" name="closeToTray" ${settings.closeToTray ? "checked" : ""} /><span>Beim Schließen im Infobereich weiterlaufen</span></label>
+        <label class="check-row"><input type="checkbox" name="doNotDisturb" ${settings.doNotDisturb ? "checked" : ""} /><span>Nicht stören – eingehende Anrufe automatisch abweisen</span></label>
         <label><span>CardDAV URL</span><input name="cardDavUrl" value="${escapeHtml(settings.cardDavUrl)}" /></label>
         <label><span>CardDAV Benutzer</span><input name="cardDavUser" value="${escapeHtml(settings.cardDavUser)}" /></label>
         <label><span>CardDAV Passwort ${isTauriRuntime() && hasStoredCardDavPassword ? "(gespeichert)" : ""}</span><input name="cardDavPassword" type="password" value="${escapeHtml(cardDavPassword)}" autocomplete="off" /></label>
@@ -790,6 +852,8 @@ function render(): void {
             <button class="secondary" id="backspace" ${!state.activeNumber ? "disabled" : ""}>Rueck</button>
             <button class="secondary" id="hold" ${state.callState === "idle" ? "disabled" : ""}>${state.callState === "held" ? "Weiter" : "Halten"}</button>
             <button class="secondary" id="mute" ${state.callState === "idle" ? "disabled" : ""}>${state.muted ? "Mikro an" : "Stumm"}</button>
+            <button class="secondary" id="transfer" ${state.callState === "active" || state.callState === "held" ? "" : "disabled"}>Weiterleiten</button>
+            <button class="secondary" id="second-call" ${state.callState === "active" ? "" : "disabled"}>Zweiter Anruf</button>
           </div>
         </div>
 
@@ -802,13 +866,13 @@ function render(): void {
                 <strong>${escapeHtml(entry.name)}</strong>
                 <small>${escapeHtml(entry.number)}</small>
               </span>
-              <small class="history-meta">${escapeHtml(entry.result || "")} · ${escapeHtml(entry.time)}</small>
+              <small class="history-meta">${escapeHtml(entry.result || "")}${entry.durationSeconds !== undefined ? ` · ${formatDuration(entry.durationSeconds)}` : ""} · ${escapeHtml(entry.time)}</small>
             </button>
           `).join("") || '<div class="empty">Noch keine Aktionen</div>'}
         </div>
       </section>
       ${showToast ? `<div class="toast ${notificationTone(notice)}" role="status"><strong>${escapeHtml(notice)}</strong></div>` : ""}
-      ${state.callState === "ringing" ? `<div class="in-app-call-backdrop"><section class="in-app-call" role="dialog" aria-modal="true"><div class="incoming-avatar">${escapeHtml(incomingInitials)}</div><div class="incoming-copy"><span>Eingehender Anruf</span><strong>${escapeHtml(incomingName)}</strong><small>${escapeHtml(state.activeNumber || state.remoteIdentity || "")}</small></div><div class="incoming-actions"><button class="danger" id="overlay-reject">Ablehnen</button><button class="primary" id="overlay-accept">Annehmen</button></div></section></div>` : ""}
+      ${state.callState === "ringing" ? `<div class="in-app-call-backdrop"><section class="in-app-call" role="dialog" aria-modal="true"><div class="incoming-avatar">${state.activeContact?.photoUrl ? `<img src="${escapeHtml(state.activeContact.photoUrl)}" alt="" />` : escapeHtml(incomingInitials)}</div><div class="incoming-copy"><span>Eingehender Anruf</span><strong>${escapeHtml(incomingName)}</strong><small>${escapeHtml(state.activeNumber || state.remoteIdentity || "")}</small></div><div class="incoming-actions"><button class="danger" id="overlay-reject">Ablehnen</button><button class="primary" id="overlay-accept">Annehmen</button></div></section></div>` : ""}
       ${settingsOpen ? renderSettingsModal() : ""}
     </section>
   `;
@@ -872,6 +936,8 @@ function bindEvents(): void {
   document.querySelector<HTMLButtonElement>("#register-sip")?.addEventListener("click", () => void registerSip());
   document.querySelector<HTMLButtonElement>("#hold")?.addEventListener("click", () => void holdCall());
   document.querySelector<HTMLButtonElement>("#mute")?.addEventListener("click", () => void toggleMute());
+  document.querySelector<HTMLButtonElement>("#transfer")?.addEventListener("click", () => void transferCall());
+  document.querySelector<HTMLButtonElement>("#second-call")?.addEventListener("click", () => void startSecondCall());
   document.querySelector<HTMLButtonElement>("#backspace")?.addEventListener("click", deleteDigit);
   document.querySelector<HTMLButtonElement>("#sync-carddav")?.addEventListener("click", () => void syncCardDav());
   document.querySelector<HTMLButtonElement>("#refresh-audio")?.addEventListener("click", () => void refreshAudioDevices(true));
@@ -903,7 +969,9 @@ function bindEvents(): void {
       enableWebRtcSip: form.get("enableWebRtcSip") === "on",
       selectedMicrophoneId: settings.selectedMicrophoneId,
       selectedSpeakerId: settings.selectedSpeakerId,
-      launchAtStartup: form.get("launchAtStartup") === "on"
+      launchAtStartup: form.get("launchAtStartup") === "on",
+      doNotDisturb: form.get("doNotDisturb") === "on",
+      closeToTray: form.get("closeToTray") === "on"
     };
     cardDavPassword = String(form.get("cardDavPassword") || "");
     sipPassword = String(form.get("sipPassword") || "");
@@ -912,6 +980,7 @@ function bindEvents(): void {
       if (isTauriRuntime()) {
         const api = await import("@tauri-apps/api/core");
         await api.invoke("set_autostart", { enabled: settings.launchAtStartup });
+        await api.invoke("set_close_to_tray", { enabled: settings.closeToTray });
       }
       await saveEnteredSecrets();
       await updateCredentialState();
@@ -949,6 +1018,7 @@ async function boot(): Promise<void> {
     try {
       const api = await import("@tauri-apps/api/core");
       settings = { ...settings, launchAtStartup: await api.invoke<boolean>("get_autostart") };
+      await api.invoke("set_close_to_tray", { enabled: settings.closeToTray });
       saveSettings(settings);
     } catch {
       // Die App bleibt auch nutzbar, wenn Windows den Autostartstatus nicht lesen kann.

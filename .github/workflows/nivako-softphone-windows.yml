@@ -197,8 +197,8 @@ jobs:
           if (-not $nsis -and -not $msi) {
             throw "Neither an NSIS setup nor an MSI package was created"
           }
-          if ($nsis) { Copy-Item $nsis.FullName "artifacts\NIVAKO-Softphone-Setup-0.2.35.exe" -Force }
-          if ($msi) { Copy-Item $msi.FullName "artifacts\NIVAKO-Softphone-0.2.35.msi" -Force }
+          if ($nsis) { Copy-Item $nsis.FullName "artifacts\NIVAKO-Softphone-Setup-0.3.0.exe" -Force }
+          if ($msi) { Copy-Item $msi.FullName "artifacts\NIVAKO-Softphone-0.3.0.msi" -Force }
 
       - name: Upload Windows artifacts
         if: always()
@@ -208,8 +208,8 @@ jobs:
           if-no-files-found: warn
           path: |
             artifacts/tauri-build.log
-            artifacts/NIVAKO-Softphone-Setup-0.2.35.exe
-            artifacts/NIVAKO-Softphone-0.2.35.msi
+            artifacts/NIVAKO-Softphone-Setup-0.3.0.exe
+            artifacts/NIVAKO-Softphone-0.3.0.msi
             artifacts/nivako-softphone-windows-portable.zip
             ${{ env.SOFTPHONE_DIR }}/src-tauri/target/release/bundle/**/*.msi
             ${{ env.SOFTPHONE_DIR }}/src-tauri/target/release/bundle/**/*.exe

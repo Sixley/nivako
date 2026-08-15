@@ -8,6 +8,7 @@ export interface TelephonyAdapter {
   mute?(): Promise<void>;
   unmute?(): Promise<void>;
   sendDtmf(digit: string): Promise<void>;
+  transfer?(target: string): Promise<void>;
 }
 
 export interface SipRegistrationConfig {
