@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
+use tauri::Manager;
 
 const CARDDAV_SERVICE: &str = "NIVAKO Softphone CardDAV";
 const SIP_SERVICE: &str = "NIVAKO Softphone SIP";
@@ -2439,54 +2439,17 @@ fn sip_dtmf(digit: String) -> Result<NativeSipStatus, AppError> {
 #[tauri::command]
 fn show_incoming_window(
     app: tauri::AppHandle,
-    caller_name: String,
-    caller_number: String,
+    _caller_name: String,
+    _caller_number: String,
 ) -> Result<(), AppError> {
-    if let Some(main) = app.get_webview_window("main") {
-        let visible = main.is_visible().unwrap_or(false);
-        let minimized = main.is_minimized().unwrap_or(false);
-        if visible && !minimized {
-            return Ok(());
-        }
-    }
     if let Some(window) = app.get_webview_window("incoming-call") {
-        let _ = window.show();
-        let _ = window.set_focus();
-        return Ok(());
+        let _ = window.close();
     }
-
-    let url = format!(
-        "index.html?incoming=1&name={}&number={}",
-        urlencoding::encode(&caller_name),
-        urlencoding::encode(&caller_number)
-    );
-    let window = WebviewWindowBuilder::new(
-        &app,
-        "incoming-call",
-        WebviewUrl::App(url.into()),
-    )
-    .title("Eingehender Anruf")
-    .inner_size(390.0, 210.0)
-    .resizable(false)
-    .decorations(false)
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .build()
-    .map_err(|error| AppError::Message(error.to_string()))?;
-
-    if let Ok(Some(monitor)) = window.primary_monitor() {
-        let size = monitor.size();
-        let scale = monitor.scale_factor();
-        let width = (390.0 * scale) as i32;
-        let height = (210.0 * scale) as i32;
-        let margin = (18.0 * scale) as i32;
-        let _ = window.set_position(PhysicalPosition::new(
-            size.width as i32 - width - margin,
-            size.height as i32 - height - margin - (48.0 * scale) as i32,
-        ));
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.unminimize();
+        let _ = main.show();
+        let _ = main.set_focus();
     }
-    let _ = window.show();
-    let _ = window.set_focus();
     Ok(())
 }
 
