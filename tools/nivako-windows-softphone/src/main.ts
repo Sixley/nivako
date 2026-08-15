@@ -13,7 +13,7 @@ import type { CallEntry, Contact, NativeSipSnapshot, Settings, SoftphoneState } 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.2.33";
+const appVersion = "0.2.34";
 const cardDavRefreshMs = 15 * 60 * 1000;
 const sipReconnectMs = 60 * 1000;
 const sipStatusPollMs = 2000;
@@ -672,10 +672,6 @@ function renderMainPanel(visibleContacts: Contact[]): string {
           <h1>Telefonbuch</h1>
           <p>${contacts.length} lokale Kontakte ${syncState === "ok" ? "· CardDAV synchronisiert" : ""}</p>
         </div>
-        <div class="panel-actions">
-          <label class="file-button">vCard importieren<input id="vcard-import" type="file" accept=".vcf,text/vcard,text/x-vcard" /></label>
-          <button class="sync-button" id="sync-carddav" ${syncState === "syncing" ? "disabled" : ""}>${syncState === "syncing" ? "Sync laeuft..." : "CardDAV sync"}</button>
-        </div>
       </div>
       <input class="search" id="search" placeholder="Name, Firma oder Nummer suchen" value="${escapeHtml(query)}" />
       <div class="contact-list">
@@ -693,7 +689,7 @@ function telephonyStatusText(): string {
   if (state.registered) return "SIP registriert";
   if (settings.safeCallMode) return "Anrufschutz aktiv";
   if (settings.enableWebRtcSip) return "SIP-WebRTC bereit";
-  if (canUseNativeTelephony()) return "Desktop-SIP bereit";
+  if (canUseNativeTelephony()) return "Telefonie noch nicht verbunden";
   if (settings.useTelLinks) return "tel:-Uebergabe aktiv";
   return "SIP-Core fehlt";
 }
@@ -729,6 +725,11 @@ function renderSettingsModal(): string {
         </details>
         <button class="primary" type="submit">Einstellungen speichern</button>
       </form>
+      <h2>Kontakte</h2>
+      <div class="contact-settings-actions">
+        <button class="secondary" id="sync-carddav" ${syncState === "syncing" ? "disabled" : ""}>${syncState === "syncing" ? "Kontakte werden aktualisiert …" : "CardDAV jetzt aktualisieren"}</button>
+        <label class="file-button">vCard-Datei importieren<input id="vcard-import" type="file" accept=".vcf,text/vcard,text/x-vcard" /></label>
+      </div>
     </div>
   </section></div>`;
 }
@@ -770,8 +771,8 @@ function render(): void {
             <span>${telephonyStatusText()}</span>
           </div>
           <div class="callee">
-            <strong>${escapeHtml(state.activeContact?.displayName || state.remoteIdentity || state.activeNumber || "Nummer waehlen")}</strong>
-            <small>${escapeHtml(state.activeContact?.organization || state.activeNumber || settings.sipServer)}</small>
+            <strong>${escapeHtml(state.activeContact?.displayName || state.remoteIdentity || state.activeNumber || "Nummer wählen")}</strong>
+            <small>${escapeHtml(state.activeContact?.organization || state.activeNumber || "Nummer eingeben oder Kontakt auswählen")}</small>
           </div>
           <input class="number-input" id="number-input" value="${escapeHtml(state.activeNumber)}" placeholder="+49..." />
           <div class="keypad">

@@ -504,6 +504,7 @@ h2 small {
 .compact-settings summary { cursor: pointer; color: var(--graphite); font-weight: 700; }
 .compact-settings details[open] summary { margin-bottom: 12px; }
 .modal-row { display: flex; justify-content: flex-end; gap: 10px; }
+.contact-settings-actions { display: flex; flex-wrap: wrap; gap: 10px; }
 
 .call-card,
 .history {

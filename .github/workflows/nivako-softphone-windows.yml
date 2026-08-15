@@ -151,12 +151,14 @@ jobs:
             throw "libmswasapi.dll is missing next to the release executable"
           }
           $manifests = Get-ChildItem -Path $release -Recurse -Include installer.nsi,*.wxs -ErrorAction SilentlyContinue
-          $manifestHit = $manifests | Where-Object { Select-String -Path $_.FullName -Pattern "liblinphone.dll" -Quiet } | Select-Object -First 1
-          if (-not $manifestHit) {
+          $dllManifest = $manifests | Where-Object { Select-String -Path $_.FullName -Pattern "liblinphone.dll" -Quiet } | Select-Object -First 1
+          $pluginManifest = $manifests | Where-Object { Select-String -Path $_.FullName -Pattern "libmswasapi.dll" -Quiet } | Select-Object -First 1
+          $grammarManifest = $manifests | Where-Object { Select-String -Path $_.FullName -Pattern "vcard_grammar.belr" -Quiet } | Select-Object -First 1
+          if (-not $dllManifest -or -not $pluginManifest -or -not $grammarManifest) {
             $manifests | Select-Object FullName
-            throw "liblinphone.dll is missing from the generated installer manifests"
+            throw "The installer manifest is missing liblinphone.dll, libmswasapi.dll or vcard_grammar.belr"
           }
-          Write-Host "Installer manifest includes liblinphone.dll via $($manifestHit.FullName)"
+          Write-Host "Installer contains the Linphone core, WASAPI media plugin and BELR data tree"
 
       - name: Create portable artifact
         if: steps.tauri_build.outcome == 'success'
@@ -195,8 +197,8 @@ jobs:
           if (-not $nsis -and -not $msi) {
             throw "Neither an NSIS setup nor an MSI package was created"
           }
-          if ($nsis) { Copy-Item $nsis.FullName "artifacts\NIVAKO-Softphone-Setup-0.2.33.exe" -Force }
-          if ($msi) { Copy-Item $msi.FullName "artifacts\NIVAKO-Softphone-0.2.33.msi" -Force }
+          if ($nsis) { Copy-Item $nsis.FullName "artifacts\NIVAKO-Softphone-Setup-0.2.34.exe" -Force }
+          if ($msi) { Copy-Item $msi.FullName "artifacts\NIVAKO-Softphone-0.2.34.msi" -Force }
 
       - name: Upload Windows artifacts
         if: always()
@@ -206,8 +208,8 @@ jobs:
           if-no-files-found: warn
           path: |
             artifacts/tauri-build.log
-            artifacts/NIVAKO-Softphone-Setup-0.2.33.exe
-            artifacts/NIVAKO-Softphone-0.2.33.msi
+            artifacts/NIVAKO-Softphone-Setup-0.2.34.exe
+            artifacts/NIVAKO-Softphone-0.2.34.msi
             artifacts/nivako-softphone-windows-portable.zip
             ${{ env.SOFTPHONE_DIR }}/src-tauri/target/release/bundle/**/*.msi
             ${{ env.SOFTPHONE_DIR }}/src-tauri/target/release/bundle/**/*.exe
