@@ -32,8 +32,8 @@
     "category": "Business",
     "resources": {
       "linphone-runtime/*.dll": "",
-      "linphone-runtime/lib/**/*": "lib/",
-      "linphone-runtime/share/**/*": "share/"
+      "linphone-runtime/lib/": "lib/",
+      "linphone-runtime/share/": "share/"
     }
   }
 }
