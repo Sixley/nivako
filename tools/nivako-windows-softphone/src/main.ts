@@ -767,8 +767,8 @@ function renderSettingsModal(): string {
       <form class="settings-list compact-settings" id="audio-form">
         <label><span>Mikrofon</span><select name="selectedMicrophoneId"><option value="">Systemstandard</option>${inputOptions}</select></label>
         <label><span>Lautsprecher</span><select name="selectedSpeakerId"><option value="">Systemstandard</option>${outputOptions}</select></label>
-        <label><span>Lautstärke (${settings.speakerVolume} %)</span><input name="speakerVolume" type="range" min="0" max="100" value="${settings.speakerVolume}" /></label>
-        <label><span>Mikrofonpegel (${settings.microphoneVolume} %)</span><input name="microphoneVolume" type="range" min="0" max="100" value="${settings.microphoneVolume}" /></label>
+        <label><span id="speaker-volume-label">Lautstärke (${settings.speakerVolume} %)</span><input name="speakerVolume" type="range" min="0" max="100" value="${settings.speakerVolume}" /></label>
+        <label><span id="microphone-volume-label">Mikrofonpegel (${settings.microphoneVolume} %)</span><input name="microphoneVolume" type="range" min="0" max="100" value="${settings.microphoneVolume}" /></label>
         <div class="modal-row"><button class="secondary" type="button" id="refresh-audio">Geräte aktualisieren</button><button class="primary" type="submit">Audio speichern</button></div>
       </form>
       <h2>Konten</h2>
@@ -776,7 +776,6 @@ function renderSettingsModal(): string {
         <h2>App-Verhalten</h2>
         <label class="check-row"><input type="checkbox" name="launchAtStartup" ${settings.launchAtStartup ? "checked" : ""} /><span>Softphone automatisch mit Windows starten</span></label>
         <label class="check-row"><input type="checkbox" name="closeToTray" ${settings.closeToTray ? "checked" : ""} /><span>Beim Schließen im Infobereich weiterlaufen</span></label>
-        <label class="check-row"><input type="checkbox" name="doNotDisturb" ${settings.doNotDisturb ? "checked" : ""} /><span>Nicht stören – eingehende Anrufe automatisch abweisen</span></label>
         <label><span>CardDAV URL</span><input name="cardDavUrl" value="${escapeHtml(settings.cardDavUrl)}" /></label>
         <label><span>CardDAV Benutzer</span><input name="cardDavUser" value="${escapeHtml(settings.cardDavUser)}" /></label>
         <label><span>CardDAV Passwort ${isTauriRuntime() && hasStoredCardDavPassword ? "(gespeichert)" : ""}</span><input name="cardDavPassword" type="password" value="${escapeHtml(cardDavPassword)}" autocomplete="off" /></label>
@@ -833,7 +832,10 @@ function render(): void {
       ${renderMainPanel(visibleContacts)}
 
       <section class="phone-panel">
-        <button class="settings-trigger" id="open-settings" title="Einstellungen" aria-label="Einstellungen">⚙</button>
+        <div class="phone-quick-actions">
+          <button class="dnd-trigger ${settings.doNotDisturb ? "active" : ""}" id="toggle-dnd" title="Nicht stören" aria-pressed="${settings.doNotDisturb}">Nicht stören</button>
+          <button class="settings-trigger" id="open-settings" title="Einstellungen" aria-label="Einstellungen">⚙</button>
+        </div>
         <div class="call-card">
           <div class="status-line">
             <span class="status-dot ${state.registered ? "" : "offline"}"></span>
@@ -893,6 +895,12 @@ function bindEvents(): void {
   });
   document.querySelector<HTMLButtonElement>("#open-settings")?.addEventListener("click", () => {
     settingsOpen = true;
+    render();
+  });
+  document.querySelector<HTMLButtonElement>("#toggle-dnd")?.addEventListener("click", () => {
+    settings = { ...settings, doNotDisturb: !settings.doNotDisturb };
+    saveSettings(settings);
+    notice = settings.doNotDisturb ? "Nicht stören ist aktiv." : "Nicht stören ist aus.";
     render();
   });
   document.querySelector<HTMLButtonElement>("#close-settings")?.addEventListener("click", () => {
@@ -974,7 +982,7 @@ function bindEvents(): void {
       selectedMicrophoneId: settings.selectedMicrophoneId,
       selectedSpeakerId: settings.selectedSpeakerId,
       launchAtStartup: form.get("launchAtStartup") === "on",
-      doNotDisturb: form.get("doNotDisturb") === "on",
+      doNotDisturb: settings.doNotDisturb,
       closeToTray: form.get("closeToTray") === "on",
       speakerVolume: settings.speakerVolume,
       microphoneVolume: settings.microphoneVolume
@@ -993,7 +1001,6 @@ function bindEvents(): void {
       configureTelephony();
       scheduleDesktopMaintenance();
       notice = "Einstellungen gespeichert.";
-      settingsOpen = false;
     } catch (error) {
       await updateCredentialState();
       configureTelephony();
@@ -1019,8 +1026,17 @@ function bindEvents(): void {
     }
     configureTelephony();
     notice = "Audio-Einstellungen gespeichert.";
-    settingsOpen = false;
     render();
+  });
+  document.querySelector<HTMLInputElement>('input[name="speakerVolume"]')?.addEventListener("input", (event) => {
+    const value = (event.currentTarget as HTMLInputElement).value;
+    const label = document.querySelector<HTMLElement>("#speaker-volume-label");
+    if (label) label.textContent = `Lautstärke (${value} %)`;
+  });
+  document.querySelector<HTMLInputElement>('input[name="microphoneVolume"]')?.addEventListener("input", (event) => {
+    const value = (event.currentTarget as HTMLInputElement).value;
+    const label = document.querySelector<HTMLElement>("#microphone-volume-label");
+    if (label) label.textContent = `Mikrofonpegel (${value} %)`;
   });
 }
 

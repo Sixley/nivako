@@ -408,10 +408,7 @@ h2 small {
 }
 
 .settings-trigger {
-  position: absolute;
-  top: 16px;
-  right: 16px;
-  z-index: 2;
+  position: static;
   display: grid;
   place-items: center;
   width: 38px;
@@ -421,6 +418,28 @@ h2 small {
   color: var(--graphite);
   background: var(--paper);
   font-size: 19px;
+}
+
+.phone-quick-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+}
+
+.dnd-trigger {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 8px 13px;
+  color: var(--muted);
+  background: var(--paper);
+  font-weight: 700;
+}
+
+.dnd-trigger.active {
+  border-color: #d29b31;
+  color: #7a4d00;
+  background: #fff0c8;
 }
 
 .settings-trigger:hover { border-color: var(--brand); background: #fff8e8; }
