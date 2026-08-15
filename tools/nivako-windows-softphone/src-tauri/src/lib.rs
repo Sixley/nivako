@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tauri::{Manager, PhysicalPosition, WebviewUrl, WebviewWindowBuilder};
 
 const CARDDAV_SERVICE: &str = "NIVAKO Softphone CardDAV";
 const SIP_SERVICE: &str = "NIVAKO Softphone SIP";
@@ -2435,8 +2436,104 @@ fn sip_dtmf(digit: String) -> Result<NativeSipStatus, AppError> {
     })
 }
 
+#[tauri::command]
+fn show_incoming_window(
+    app: tauri::AppHandle,
+    caller_name: String,
+    caller_number: String,
+) -> Result<(), AppError> {
+    if let Some(window) = app.get_webview_window("incoming-call") {
+        let _ = window.show();
+        let _ = window.set_focus();
+        return Ok(());
+    }
+
+    let url = format!(
+        "index.html?incoming=1&name={}&number={}",
+        urlencoding::encode(&caller_name),
+        urlencoding::encode(&caller_number)
+    );
+    let window = WebviewWindowBuilder::new(
+        &app,
+        "incoming-call",
+        WebviewUrl::App(url.into()),
+    )
+    .title("Eingehender Anruf")
+    .inner_size(390.0, 210.0)
+    .resizable(false)
+    .decorations(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .build()
+    .map_err(|error| AppError::Message(error.to_string()))?;
+
+    if let Ok(Some(monitor)) = window.primary_monitor() {
+        let size = monitor.size();
+        let scale = monitor.scale_factor();
+        let width = (390.0 * scale) as i32;
+        let height = (210.0 * scale) as i32;
+        let margin = (18.0 * scale) as i32;
+        let _ = window.set_position(PhysicalPosition::new(
+            size.width as i32 - width - margin,
+            size.height as i32 - height - margin - (48.0 * scale) as i32,
+        ));
+    }
+    let _ = window.show();
+    let _ = window.set_focus();
+    Ok(())
+}
+
+#[tauri::command]
+fn hide_incoming_window(app: tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("incoming-call") {
+        let _ = window.close();
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            use tauri::menu::{Menu, MenuItem};
+            use tauri::tray::TrayIconBuilder;
+
+            let show = MenuItem::with_id(app, "show", "Softphone öffnen", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Beenden", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &quit])?;
+            TrayIconBuilder::with_id("nivako-softphone-tray")
+                .icon(app.default_window_icon().cloned().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, "App-Symbol fehlt")
+                })?)
+                .tooltip("NIVAKO Softphone")
+                .menu(&menu)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let tauri::tray::TrayIconEvent::DoubleClick { .. } = event {
+                        if let Some(window) = tray.app_handle().get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                })
+                .build(app)?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             save_secret,
             has_secret,
@@ -2450,7 +2547,9 @@ pub fn run() {
             sip_hangup,
             sip_hold,
             sip_mute,
-            sip_dtmf
+            sip_dtmf,
+            show_incoming_window,
+            hide_incoming_window
         ])
         .run(tauri::generate_context!())
         .expect("error while running NIVAKO Softphone");

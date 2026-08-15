@@ -184,6 +184,20 @@ jobs:
           }
           Compress-Archive -Path "$portable\*" -DestinationPath "artifacts\nivako-softphone-windows-portable.zip" -Force
 
+      - name: Collect installable packages
+        if: steps.tauri_build.outcome == 'success'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $bundle = "$env:SOFTPHONE_DIR\src-tauri\target\release\bundle"
+          $nsis = Get-ChildItem -Path $bundle -Recurse -Filter "*-setup.exe" | Select-Object -First 1
+          $msi = Get-ChildItem -Path $bundle -Recurse -Filter "*.msi" | Select-Object -First 1
+          if (-not $nsis -and -not $msi) {
+            throw "Neither an NSIS setup nor an MSI package was created"
+          }
+          if ($nsis) { Copy-Item $nsis.FullName "artifacts\NIVAKO-Softphone-Setup-0.2.32.exe" -Force }
+          if ($msi) { Copy-Item $msi.FullName "artifacts\NIVAKO-Softphone-0.2.32.msi" -Force }
+
       - name: Upload Windows artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -192,6 +206,8 @@ jobs:
           if-no-files-found: warn
           path: |
             artifacts/tauri-build.log
+            artifacts/NIVAKO-Softphone-Setup-0.2.32.exe
+            artifacts/NIVAKO-Softphone-0.2.32.msi
             artifacts/nivako-softphone-windows-portable.zip
             ${{ env.SOFTPHONE_DIR }}/src-tauri/target/release/bundle/**/*.msi
             ${{ env.SOFTPHONE_DIR }}/src-tauri/target/release/bundle/**/*.exe

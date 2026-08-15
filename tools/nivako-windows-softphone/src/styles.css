@@ -79,7 +79,7 @@ button:disabled {
   display: block;
   width: 100%;
   height: auto;
-  border-radius: 6px;
+  object-fit: contain;
 }
 
 .brand small,
@@ -113,52 +113,34 @@ button:disabled {
   background: var(--brand);
 }
 
-.health-strip {
+.incoming-popup {
   display: grid;
-  gap: 8px;
-  margin-top: auto;
-  padding-top: 24px;
+  grid-template-columns: 62px 1fr;
+  gap: 14px;
+  width: 100%;
+  height: 100%;
+  padding: 20px;
+  color: #f8f5ee;
+  background: #151515;
 }
 
-.health-pill {
+.incoming-avatar {
   display: grid;
-  gap: 3px;
-  border: 1px solid #393632;
-  border-radius: 7px;
-  padding: 10px 12px;
-  background: #1b1b1c;
-}
-
-.health-pill span {
-  color: #aaa196;
-  font-size: 11px;
-}
-
-.health-pill strong {
-  color: #f4efe7;
-  font-size: 13px;
+  place-items: center;
+  width: 62px;
+  height: 62px;
+  border-radius: 50%;
+  color: #151515;
+  background: var(--brand);
+  font-size: 20px;
   font-weight: 800;
 }
 
-.health-pill.ok {
-  border-color: rgba(255, 173, 0, 0.62);
-}
-
-.health-pill.ok strong {
-  color: #ffd37a;
-}
-
-.health-pill.warn strong {
-  color: #ffcf6d;
-}
-
-.health-pill.error {
-  border-color: #8f3434;
-}
-
-.health-pill.error strong {
-  color: #ffb3b3;
-}
+.incoming-copy { display: grid; align-content: center; gap: 3px; min-width: 0; }
+.incoming-copy span, .incoming-copy small { color: #c6beb0; }
+.incoming-copy strong { overflow: hidden; font-size: 19px; text-overflow: ellipsis; white-space: nowrap; }
+.incoming-actions { display: grid; grid-column: 1 / -1; grid-template-columns: 1fr 1fr; gap: 10px; }
+.incoming-actions button { border-radius: 7px; padding: 12px; font-weight: 800; }
 
 .contacts-panel {
   display: flex;

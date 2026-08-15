@@ -3,7 +3,7 @@ import brandLogoUrl from "./assets/nivako-softphone-logo.png";
 import { loadAudioDevices, type AudioDeviceState } from "./audioDevices";
 import { parseManyVCards } from "./carddav";
 import { syncCardDavContacts } from "./contactsRepository";
-import { getSipStatusNative, hasSecretNative, isTauriRuntime, loadSecretNative, saveSecretNative } from "./nativeBridge";
+import { acceptNative, getSipStatusNative, hasSecretNative, isTauriRuntime, loadSecretNative, rejectNative, saveSecretNative } from "./nativeBridge";
 import { canUseNativeTelephony, NativeTelephonyAdapter } from "./nativeTelephony";
 import { searchContacts } from "./search";
 import { loadContacts, loadFavoriteIds, loadHistory, loadSettings, saveContacts, saveFavoriteIds, saveHistory, saveSettings } from "./storage";
@@ -13,7 +13,7 @@ import type { CallEntry, Contact, NativeSipSnapshot, Settings, SoftphoneState } 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.2.30";
+const appVersion = "0.2.32";
 const cardDavRefreshMs = 15 * 60 * 1000;
 const sipReconnectMs = 60 * 1000;
 const sipStatusPollMs = 2000;
@@ -98,6 +98,21 @@ let state: SoftphoneState = {
   activeNumber: "",
   callState: "idle"
 };
+let incomingWindowVisible = false;
+
+async function setIncomingWindow(visible: boolean): Promise<void> {
+  if (!isTauriRuntime() || incomingWindowVisible === visible) return;
+  incomingWindowVisible = visible;
+  const api = await import("@tauri-apps/api/core");
+  if (visible) {
+    await api.invoke("show_incoming_window", {
+      callerName: state.activeContact?.displayName || state.remoteIdentity || "Unbekannter Anrufer",
+      callerNumber: state.activeNumber || state.remoteIdentity || ""
+    });
+  } else {
+    await api.invoke("hide_incoming_window");
+  }
+}
 
 type Tone = "ok" | "warn" | "error" | "neutral";
 
@@ -210,6 +225,7 @@ function applyNativeSipSnapshot(snapshot: NativeSipSnapshot): void {
 
   sipNotice = nextNotice;
   state = nextState;
+  void setIncomingWindow(nextState.callState === "ringing");
   renderUnlessEditing();
 }
 
@@ -689,15 +705,6 @@ function navButton(view: View, label: string): string {
   return `<button data-view="${view}" class="${activeView === view ? "active" : ""}">${label}</button>`;
 }
 
-function healthPill(label: string, value: string, stateClass = ""): string {
-  return `
-    <div class="health-pill ${stateClass}">
-      <span>${escapeHtml(label)}</span>
-      <strong>${escapeHtml(value)}</strong>
-    </div>
-  `;
-}
-
 function telephonyStatusText(): string {
   if (state.registered) return "SIP registriert";
   if (settings.safeCallMode) return "Anrufschutz aktiv";
@@ -726,11 +733,6 @@ function render(): void {
           ${navButton("audio", "Audio")}
           ${navButton("settings", "Einstellungen")}
         </nav>
-        <div class="health-strip">
-          ${healthPill("SIP", state.registered ? "online" : "offline", state.registered ? "ok" : "warn")}
-          ${healthPill("CardDAV", syncState === "ok" ? `ok ${lastCardDavSync}` : syncState === "syncing" ? "sync" : contacts.length ? `${contacts.length} lokal` : "leer", syncState === "error" ? "error" : syncState === "ok" ? "ok" : "")}
-          ${healthPill("Audio", audioDevices.permission === "denied" ? "gesperrt" : audioDevices.inputs.length ? `${audioDevices.inputs.length} Mic` : "Standard", audioDevices.permission === "denied" ? "error" : "")}
-        </div>
       </aside>
 
       ${renderMainPanel(visibleContacts)}
@@ -891,6 +893,15 @@ function bindEvents(): void {
 }
 
 async function boot(): Promise<void> {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("incoming") === "1") {
+    const name = params.get("name") || "Unbekannter Anrufer";
+    const number = params.get("number") || "";
+    root.innerHTML = `<main class="incoming-popup"><div class="incoming-avatar">${escapeHtml(name.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase() || "?")}</div><div class="incoming-copy"><span>Eingehender Anruf</span><strong>${escapeHtml(name)}</strong><small>${escapeHtml(number)}</small></div><div class="incoming-actions"><button class="danger" id="popup-reject">Ablehnen</button><button class="primary" id="popup-accept">Annehmen</button></div></main>`;
+    document.querySelector("#popup-accept")?.addEventListener("click", () => void acceptNative().finally(() => window.close()));
+    document.querySelector("#popup-reject")?.addEventListener("click", () => void rejectNative().finally(() => window.close()));
+    return;
+  }
   configureTelephony();
   render();
   await updateCredentialState();
