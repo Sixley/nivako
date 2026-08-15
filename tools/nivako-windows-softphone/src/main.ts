@@ -13,7 +13,7 @@ import type { CallEntry, Contact, NativeSipSnapshot, Settings, SoftphoneState } 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.2.32";
+const appVersion = "0.2.33";
 const cardDavRefreshMs = 15 * 60 * 1000;
 const sipReconnectMs = 60 * 1000;
 const sipStatusPollMs = 2000;
@@ -84,7 +84,7 @@ let hasStoredCardDavPassword = false;
 let hasStoredSipPassword = false;
 let query = "";
 let activeView: View = "contacts";
-let lastCardDavSync = "";
+let settingsOpen = false;
 let cardDavTimer: number | undefined;
 let sipReconnectTimer: number | undefined;
 let sipStatusTimer: number | undefined;
@@ -99,6 +99,9 @@ let state: SoftphoneState = {
   callState: "idle"
 };
 let incomingWindowVisible = false;
+let lastToastNotice = notice;
+let toastUntil = 0;
+let toastTimer: number | undefined;
 
 async function setIncomingWindow(visible: boolean): Promise<void> {
   if (!isTauriRuntime() || incomingWindowVisible === visible) return;
@@ -116,25 +119,11 @@ async function setIncomingWindow(visible: boolean): Promise<void> {
 
 type Tone = "ok" | "warn" | "error" | "neutral";
 
-function statusTone(): Tone {
-  if (syncState === "error") return "error";
-  if (state.registered) return "ok";
-  if (sipNotice.toLowerCase().includes("fehlgeschlagen") || sipNotice.toLowerCase().includes("unauthorized")) return "warn";
-  return "neutral";
-}
-
-function serviceLine(): string {
-  const cardDav = syncState === "ok"
-    ? `CardDAV aktuell${lastCardDavSync ? ` um ${lastCardDavSync}` : ""}`
-    : contacts.length
-      ? `${contacts.length} Kontakte lokal verfuegbar`
-      : "Noch keine Kontakte geladen";
-  const sip = state.registered
-    ? "Telefonie bereit"
-    : hasStoredSipPassword
-      ? "SIP wartet auf erfolgreiche Registrierung"
-      : "SIP noch nicht eingerichtet";
-  return `${cardDav} · ${sip}`;
+function notificationTone(message: string): Tone {
+  const lower = message.toLowerCase();
+  if (lower.includes("fehl") || lower.includes("gesperrt") || lower.includes("abgelehnt")) return "error";
+  if (lower.includes("wartet") || lower.includes("nicht registriert") || lower.includes("nicht eingerichtet")) return "warn";
+  return "ok";
 }
 
 function isEditingElement(element: Element | null): boolean {
@@ -245,10 +234,6 @@ function errorMessage(error: unknown, fallback: string): string {
     }
   }
   return fallback;
-}
-
-function nowLabel(): string {
-  return new Intl.DateTimeFormat("de-DE", { hour: "2-digit", minute: "2-digit" }).format(new Date());
 }
 
 function applyFavorites(nextContacts: Contact[], favoriteIds: string[]): Contact[] {
@@ -462,7 +447,6 @@ async function syncCardDav(): Promise<void> {
     contacts = applyFavorites(contactsWithPhones, favoriteIds);
     persistContacts();
     syncState = "ok";
-    lastCardDavSync = nowLabel();
     notice = `CardDAV aktualisiert: ${contactsWithPhones.length} Kontakte mit Telefonnummer.`;
   } catch (error) {
     syncState = "error";
@@ -714,10 +698,53 @@ function telephonyStatusText(): string {
   return "SIP-Core fehlt";
 }
 
+function renderSettingsModal(): string {
+  const inputOptions = audioDevices.inputs.map((device, index) => `<option value="${escapeHtml(device.deviceId)}" ${settings.selectedMicrophoneId === device.deviceId ? "selected" : ""}>${escapeHtml(device.label || `Mikrofon ${index + 1}`)}</option>`).join("");
+  const outputOptions = audioDevices.outputs.map((device, index) => `<option value="${escapeHtml(device.deviceId)}" ${settings.selectedSpeakerId === device.deviceId ? "selected" : ""}>${escapeHtml(device.label || `Lautsprecher ${index + 1}`)}</option>`).join("");
+  return `<div class="settings-modal-backdrop"><section class="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <header><div><h1 id="settings-title">Einstellungen</h1><p>Telefonie, Kontakte und Audio</p></div><button class="modal-close" id="close-settings" aria-label="Schließen">×</button></header>
+    <div class="settings-modal-content">
+      <h2>Audio</h2>
+      <form class="settings-list compact-settings" id="audio-form">
+        <label><span>Mikrofon</span><select name="selectedMicrophoneId"><option value="">Systemstandard</option>${inputOptions}</select></label>
+        <label><span>Lautsprecher</span><select name="selectedSpeakerId"><option value="">Systemstandard</option>${outputOptions}</select></label>
+        <div class="modal-row"><button class="secondary" type="button" id="refresh-audio">Geräte aktualisieren</button><button class="primary" type="submit">Audio speichern</button></div>
+      </form>
+      <h2>Konten</h2>
+      <form class="settings-list compact-settings" id="settings-form">
+        <label><span>CardDAV URL</span><input name="cardDavUrl" value="${escapeHtml(settings.cardDavUrl)}" /></label>
+        <label><span>CardDAV Benutzer</span><input name="cardDavUser" value="${escapeHtml(settings.cardDavUser)}" /></label>
+        <label><span>CardDAV Passwort ${isTauriRuntime() && hasStoredCardDavPassword ? "(gespeichert)" : ""}</span><input name="cardDavPassword" type="password" value="${escapeHtml(cardDavPassword)}" autocomplete="off" /></label>
+        <label><span>SIP-Server</span><input name="sipServer" value="${escapeHtml(settings.sipServer)}" /></label>
+        <label><span>SIP-Benutzer</span><input name="sipExtension" value="${escapeHtml(settings.sipExtension)}" /></label>
+        <label><span>SIP Auth-ID</span><input name="sipAuthUser" value="${escapeHtml(settings.sipAuthUser || settings.sipExtension)}" /></label>
+        <label><span>SIP Anzeigename</span><input name="sipDisplayName" value="${escapeHtml(settings.sipDisplayName)}" /></label>
+        <label><span>SIP Passwort ${isTauriRuntime() && hasStoredSipPassword ? "(gespeichert)" : ""}</span><input name="sipPassword" type="password" value="${escapeHtml(sipPassword)}" autocomplete="off" /></label>
+        <details><summary>Erweiterte Einstellungen</summary>
+          <label><span>SIP WebSocket</span><input name="sipWebSocketUrl" value="${escapeHtml(settings.sipWebSocketUrl)}" /></label>
+          <label><span>Erlaubte Testnummern</span><input name="allowedTestNumbers" value="${escapeHtml(settings.allowedTestNumbers)}" /></label>
+          <label class="check-row"><input type="checkbox" name="safeCallMode" ${settings.safeCallMode ? "checked" : ""} /><span>Anrufschutz aktiv</span></label>
+          <label class="check-row"><input type="checkbox" name="useTelLinks" ${settings.useTelLinks ? "checked" : ""} /><span>Windows-Telefonhandler verwenden</span></label>
+          <label class="check-row"><input type="checkbox" name="enableWebRtcSip" ${settings.enableWebRtcSip ? "checked" : ""} /><span>SIP über WebRTC aktivieren</span></label>
+        </details>
+        <button class="primary" type="submit">Einstellungen speichern</button>
+      </form>
+    </div>
+  </section></div>`;
+}
+
 function render(): void {
   const visibleContacts = searchContacts(contacts, query);
   const keypad = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"];
-  const tone = statusTone();
+  if (notice !== lastToastNotice) {
+    lastToastNotice = notice;
+    toastUntil = Date.now() + 3600;
+    if (toastTimer !== undefined) window.clearTimeout(toastTimer);
+    toastTimer = window.setTimeout(() => renderUnlessEditing(), 3650);
+  }
+  const showToast = toastUntil > Date.now();
+  const incomingName = state.activeContact?.displayName || state.remoteIdentity || "Unbekannter Anrufer";
+  const incomingInitials = incomingName.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase() || "?";
 
   root.innerHTML = `
     <section class="shell">
@@ -730,18 +757,13 @@ function render(): void {
           ${navButton("contacts", "Kontakte")}
           ${navButton("history", "Verlauf")}
           ${navButton("favorites", "Favoriten")}
-          ${navButton("audio", "Audio")}
-          ${navButton("settings", "Einstellungen")}
         </nav>
       </aside>
 
       ${renderMainPanel(visibleContacts)}
 
       <section class="phone-panel">
-        <div class="notice ${tone}">
-          <strong>${escapeHtml(notice)}</strong>
-          <span>${escapeHtml(serviceLine())}</span>
-        </div>
+        <button class="settings-trigger" id="open-settings" title="Einstellungen" aria-label="Einstellungen">⚙</button>
         <div class="call-card">
           <div class="status-line">
             <span class="status-dot ${state.registered ? "" : "offline"}"></span>
@@ -781,6 +803,9 @@ function render(): void {
           `).join("") || '<div class="empty">Noch keine Aktionen</div>'}
         </div>
       </section>
+      ${showToast ? `<div class="toast ${notificationTone(notice)}" role="status"><strong>${escapeHtml(notice)}</strong></div>` : ""}
+      ${state.callState === "ringing" ? `<div class="in-app-call-backdrop"><section class="in-app-call" role="dialog" aria-modal="true"><div class="incoming-avatar">${escapeHtml(incomingInitials)}</div><div class="incoming-copy"><span>Eingehender Anruf</span><strong>${escapeHtml(incomingName)}</strong><small>${escapeHtml(state.activeNumber || state.remoteIdentity || "")}</small></div><div class="incoming-actions"><button class="danger" id="overlay-reject">Ablehnen</button><button class="primary" id="overlay-accept">Annehmen</button></div></section></div>` : ""}
+      ${settingsOpen ? renderSettingsModal() : ""}
     </section>
   `;
 
@@ -794,6 +819,22 @@ function bindEvents(): void {
       render();
     });
   });
+  document.querySelector<HTMLButtonElement>("#open-settings")?.addEventListener("click", () => {
+    settingsOpen = true;
+    render();
+  });
+  document.querySelector<HTMLButtonElement>("#close-settings")?.addEventListener("click", () => {
+    settingsOpen = false;
+    render();
+  });
+  document.querySelector<HTMLDivElement>(".settings-modal-backdrop")?.addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) {
+      settingsOpen = false;
+      render();
+    }
+  });
+  document.querySelector<HTMLButtonElement>("#overlay-accept")?.addEventListener("click", () => void dial());
+  document.querySelector<HTMLButtonElement>("#overlay-reject")?.addEventListener("click", () => void hangup());
 
   document.querySelector<HTMLInputElement>("#search")?.addEventListener("input", (event) => {
     const input = event.target as HTMLInputElement;
@@ -868,6 +909,7 @@ function bindEvents(): void {
       configureTelephony();
       scheduleDesktopMaintenance();
       notice = "Einstellungen gespeichert.";
+      settingsOpen = false;
     } catch (error) {
       await updateCredentialState();
       configureTelephony();
@@ -888,6 +930,7 @@ function bindEvents(): void {
     saveSettings(settings);
     configureTelephony();
     notice = "Audio-Einstellungen gespeichert.";
+    settingsOpen = false;
     render();
   });
 }

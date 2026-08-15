@@ -2442,6 +2442,13 @@ fn show_incoming_window(
     caller_name: String,
     caller_number: String,
 ) -> Result<(), AppError> {
+    if let Some(main) = app.get_webview_window("main") {
+        let visible = main.is_visible().unwrap_or(false);
+        let minimized = main.is_minimized().unwrap_or(false);
+        if visible && !minimized {
+            return Ok(());
+        }
+    }
     if let Some(window) = app.get_webview_window("incoming-call") {
         let _ = window.show();
         let _ = window.set_focus();
