@@ -241,6 +241,7 @@ struct LinphoneSession {
     sip_server: String,
     sip_extension: String,
     audio_profile: String,
+    active_call: *mut LinphoneCall,
     held: bool,
     muted: bool,
 }
@@ -1597,6 +1598,7 @@ fn sip_register_linphone(
         sip_server: sip_server.to_string(),
         sip_extension: sip_extension.to_string(),
         audio_profile,
+        active_call: ptr::null_mut(),
         held: false,
         muted: false,
     };
@@ -2188,6 +2190,7 @@ fn sip_dial(
                 session.audio_profile
             )));
         }
+        session.active_call = call;
         let snapshot = session_snapshot(
             session,
             format!(
@@ -2230,6 +2233,7 @@ fn sip_accept() -> Result<NativeSipStatus, AppError> {
                 "Annehmen wurde von liblinphone abgelehnt (status={status})"
             )));
         }
+        session.active_call = call;
         let snapshot = session_snapshot(session, "Eingehender Anruf angenommen.".to_string());
         set_sip_snapshot(snapshot.clone());
         Ok(NativeSipStatus {
@@ -2293,6 +2297,7 @@ fn sip_hangup() -> Result<NativeSipStatus, AppError> {
     with_session(|session| {
         unsafe { linphone_core_terminate_all_calls(session.core) };
         tick_core_for(session.core, 5, 80);
+        session.active_call = ptr::null_mut();
         session.held = false;
         let snapshot = session_snapshot(session, "Anruf beendet.".to_string());
         set_sip_snapshot(snapshot.clone());
@@ -2317,7 +2322,12 @@ fn sip_hold() -> Result<NativeSipStatus, AppError> {
     }
 
     with_session(|session| {
-        let call = unsafe { linphone_core_get_current_call(session.core) };
+        let current_call = unsafe { linphone_core_get_current_call(session.core) };
+        let call = if current_call.is_null() && session.held {
+            session.active_call
+        } else {
+            current_call
+        };
         if call.is_null() {
             return Err(AppError::Message(
                 "Kein aktiver Anruf zum Halten".to_string(),
@@ -2333,8 +2343,9 @@ fn sip_hold() -> Result<NativeSipStatus, AppError> {
                 "Halten/Fortsetzen wurde von liblinphone abgelehnt".to_string(),
             ));
         }
+        session.active_call = call;
+        tick_core_for(session.core, 10, 80);
         session.held = !session.held;
-        tick_core_for(session.core, 5, 80);
         let snapshot = session_snapshot(
             session,
             if session.held {

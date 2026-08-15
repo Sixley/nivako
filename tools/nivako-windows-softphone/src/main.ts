@@ -3,7 +3,7 @@ import brandLogoUrl from "./assets/nivako-softphone-logo.png";
 import { loadAudioDevices, type AudioDeviceState } from "./audioDevices";
 import { parseManyVCards } from "./carddav";
 import { syncCardDavContacts } from "./contactsRepository";
-import { getLastCardDavDiagnostic, getSipStatusNative, hasSecretNative, isTauriRuntime, loadSecretNative, saveSecretNative } from "./nativeBridge";
+import { getSipStatusNative, hasSecretNative, isTauriRuntime, loadSecretNative, saveSecretNative } from "./nativeBridge";
 import { canUseNativeTelephony, NativeTelephonyAdapter } from "./nativeTelephony";
 import { searchContacts } from "./search";
 import { loadContacts, loadFavoriteIds, loadHistory, loadSettings, saveContacts, saveFavoriteIds, saveHistory, saveSettings } from "./storage";
@@ -14,7 +14,6 @@ const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
 const appVersion = "0.2.30";
-const buildLabel = "0.2.30 Eingehende Anrufsteuerung";
 const cardDavRefreshMs = 15 * 60 * 1000;
 const sipReconnectMs = 60 * 1000;
 const sipStatusPollMs = 2000;
@@ -86,12 +85,11 @@ let hasStoredSipPassword = false;
 let query = "";
 let activeView: View = "contacts";
 let lastCardDavSync = "";
-let lastSipRegister = "";
 let cardDavTimer: number | undefined;
 let sipReconnectTimer: number | undefined;
 let sipStatusTimer: number | undefined;
 let notice = isTauriRuntime()
-  ? `Desktop-Modus bereit. Build ${buildLabel}.`
+  ? "Softphone bereit."
   : "Bereit. CardDAV kann synchronisiert werden; echte Anrufe bleiben blockiert, solange der Anrufschutz aktiv ist.";
 let sipNotice = "SIP nicht registriert.";
 let syncState: "idle" | "syncing" | "ok" | "error" = "idle";
@@ -110,16 +108,6 @@ function statusTone(): Tone {
   return "neutral";
 }
 
-function primaryStatusText(): string {
-  if (state.registered) return `Nebenstelle ${settings.sipExtension} ist registriert.`;
-  if (sipNotice.toLowerCase().includes("unauthorized")) {
-    return "SIP-Anmeldung abgelehnt. Bitte Benutzer, Auth-ID und Passwort pruefen.";
-  }
-  if (syncState === "error") return "CardDAV braucht Aufmerksamkeit.";
-  if (hasStoredSipPassword) return "SIP wird automatisch erneut verbunden.";
-  return "SIP-Zugangsdaten fehlen noch.";
-}
-
 function serviceLine(): string {
   const cardDav = syncState === "ok"
     ? `CardDAV aktuell${lastCardDavSync ? ` um ${lastCardDavSync}` : ""}`
@@ -132,24 +120,6 @@ function serviceLine(): string {
       ? "SIP wartet auf erfolgreiche Registrierung"
       : "SIP noch nicht eingerichtet";
   return `${cardDav} · ${sip}`;
-}
-
-function renderDiagnostics(): string {
-  const lines = [
-    `Letzte Meldung: ${notice}`,
-    `Telefonie: ${settings.enableWebRtcSip ? "WebRTC/WSS-Fallback" : canUseNativeTelephony() ? "Native SIP/liblinphone" : "Browser-Modus"}`,
-    `SIP-Status: ${sipNotice}`,
-    `CardDAV: ${settings.cardDavUser || "kein Benutzer"} · ${settings.cardDavUrl || "keine URL"}`,
-    `Autopilot: CardDAV alle 15 Minuten${lastCardDavSync ? `, zuletzt ${lastCardDavSync}` : ""} · SIP-Reconnect alle 60 Sekunden${lastSipRegister ? `, zuletzt ${lastSipRegister}` : ""}`,
-    `Build: ${buildLabel}`
-  ];
-
-  return `
-    <details class="diagnostics">
-      <summary>Diagnose anzeigen</summary>
-      <div>${lines.map((line) => `<p>${escapeHtml(line)}</p>`).join("")}</div>
-    </details>
-  `;
 }
 
 function isEditingElement(element: Element | null): boolean {
@@ -176,13 +146,24 @@ function renderAndRestoreInput(selector: string, start: number | null, end: numb
 function applyTelephonyStatus(status: string, registered?: boolean): void {
   sipNotice = status;
   state = { ...state, registered: registered ?? state.registered };
-  if (status.startsWith("Anruf klingelt")) state = { ...state, callState: "ringing" };
-  if (status.startsWith("Anruf aktiv") || status.startsWith("Anruf verbunden")) state = { ...state, callState: "active" };
-  if (status.startsWith("Nativer Anruf gestartet")) state = { ...state, callState: "dialing" };
+  if (status.startsWith("Anruf klingelt")) {
+    state = { ...state, callState: "ringing" };
+    notice = "Eingehender Anruf.";
+  }
+  if (status.startsWith("Anruf aktiv") || status.startsWith("Anruf verbunden")) {
+    state = { ...state, callState: "active" };
+    notice = "Anruf verbunden.";
+  }
+  if (status.startsWith("Nativer Anruf gestartet")) {
+    state = { ...state, callState: "dialing" };
+    notice = "Anruf wird aufgebaut.";
+  }
   if (status.startsWith("Anruf beendet") || status.startsWith("Anruf fehlgeschlagen")) {
     state = { ...state, callState: "idle", muted: false };
+    notice = status.startsWith("Anruf beendet") ? "Anruf beendet." : "Anruf fehlgeschlagen.";
+  } else if (registered && state.callState === "idle") {
+    notice = "Telefonie bereit.";
   }
-  notice = status;
   renderUnlessEditing();
 }
 
@@ -318,11 +299,10 @@ async function registerSip(): Promise<void> {
     }
     configureTelephony();
     await telephony.register();
-    lastSipRegister = nowLabel();
   } catch (error) {
     state = { ...state, registered: false };
     sipNotice = errorMessage(error, "SIP Registrierung fehlgeschlagen");
-    notice = sipNotice;
+    notice = "SIP-Anmeldung fehlgeschlagen. Bitte Zugangsdaten und Verbindung prüfen.";
     render();
   }
 }
@@ -386,7 +366,7 @@ async function dial(): Promise<void> {
     await telephony.dial(state.activeNumber);
     addHistory("outbound", state.activeNumber, state.activeContact?.displayName || state.activeNumber, "started");
     if (canUseNativeTelephony() && !settings.enableWebRtcSip) {
-      notice = sipNotice || "Nativer SIP-Anruf gestartet.";
+      notice = "Anruf wird aufgebaut.";
     } else {
       state = { ...state, callState: "active" };
       notice = settings.enableWebRtcSip
@@ -467,11 +447,10 @@ async function syncCardDav(): Promise<void> {
     persistContacts();
     syncState = "ok";
     lastCardDavSync = nowLabel();
-    const nativeDiagnostic = isTauriRuntime() ? ` ${getLastCardDavDiagnostic()}` : "";
-    notice = `CardDAV OK: ${synced.length} Kontakte gelesen, ${contactsWithPhones.length} mit Telefonnummer.${nativeDiagnostic}`;
+    notice = `CardDAV aktualisiert: ${contactsWithPhones.length} Kontakte mit Telefonnummer.`;
   } catch (error) {
     syncState = "error";
-    notice = `CardDAV-Sync fehlgeschlagen: ${errorMessage(error, "Unbekannter Fehler")}`;
+    notice = "Kontakte konnten nicht aktualisiert werden. Bitte CardDAV-Einstellungen prüfen.";
   }
 
   render();
@@ -609,7 +588,7 @@ function renderMainPanel(visibleContacts: Contact[]): string {
         <div class="panel-header">
           <div>
             <h1>Verlauf</h1>
-            <p>Lokaler Verlauf dieser App, keine erfundene PBX-Historie</p>
+            <p>Ihre letzten Anrufe auf diesem Gerät</p>
           </div>
           <button class="sync-button" id="clear-history">Leeren</button>
         </div>
@@ -758,7 +737,7 @@ function render(): void {
 
       <section class="phone-panel">
         <div class="notice ${tone}">
-          <strong>${escapeHtml(primaryStatusText())}</strong>
+          <strong>${escapeHtml(notice)}</strong>
           <span>${escapeHtml(serviceLine())}</span>
         </div>
         <div class="call-card">
@@ -784,7 +763,6 @@ function render(): void {
             <button class="secondary" id="hold" ${state.callState === "idle" ? "disabled" : ""}>${state.callState === "held" ? "Weiter" : "Halten"}</button>
             <button class="secondary" id="mute" ${state.callState === "idle" ? "disabled" : ""}>${state.muted ? "Mikro an" : "Stumm"}</button>
           </div>
-          ${renderDiagnostics()}
         </div>
 
         <div class="history">
