@@ -53,6 +53,8 @@ export interface Settings {
   launchAtStartup: boolean;
   doNotDisturb: boolean;
   closeToTray: boolean;
+  speakerVolume: number;
+  microphoneVolume: number;
 }
 
 export interface NativeSipStatus {

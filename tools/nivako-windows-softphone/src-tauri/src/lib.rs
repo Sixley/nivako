@@ -309,6 +309,10 @@ enum SipSidecarCommand {
     Transfer {
         target: String,
     },
+    AudioLevels {
+        playback: i32,
+        microphone: i32,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1829,6 +1833,10 @@ fn sidecar_reply(command: SipSidecarCommand) -> SipSidecarReply {
             Ok(status) => SipSidecarReply::Status { status },
             Err(error) => SipSidecarReply::Error { message: error.to_string() },
         },
+        SipSidecarCommand::AudioLevels { playback, microphone } => match sip_set_audio_levels(playback, microphone) {
+            Ok(status) => SipSidecarReply::Status { status },
+            Err(error) => SipSidecarReply::Error { message: error.to_string() },
+        },
     }
 }
 
@@ -2373,6 +2381,28 @@ fn sip_hold() -> Result<NativeSipStatus, AppError> {
 }
 
 #[tauri::command]
+fn sip_set_audio_levels(playback: i32, microphone: i32) -> Result<NativeSipStatus, AppError> {
+    let playback = playback.clamp(0, 100);
+    let microphone = microphone.clamp(0, 100);
+    if !is_sip_sidecar_process() {
+        return match sip_sidecar_call(SipSidecarCommand::AudioLevels { playback, microphone })? {
+            SipSidecarReply::Status { status } => Ok(status),
+            SipSidecarReply::Error { message } => Err(AppError::Message(message)),
+            SipSidecarReply::Snapshot { snapshot } => Ok(NativeSipStatus { registered: snapshot.registered, message: snapshot.message }),
+        };
+    }
+    with_session(|session| {
+        unsafe {
+            linphone_core_set_play_level(session.core, playback);
+            linphone_core_set_rec_level(session.core, microphone);
+        }
+        let snapshot = session_snapshot(session, "Audiopegel übernommen.".to_string());
+        set_sip_snapshot(snapshot.clone());
+        Ok(NativeSipStatus { registered: snapshot.registered, message: snapshot.message })
+    })
+}
+
+#[tauri::command]
 fn sip_transfer(target: String) -> Result<NativeSipStatus, AppError> {
     if !is_sip_sidecar_process() {
         return match sip_sidecar_call(SipSidecarCommand::Transfer { target })? {
@@ -2610,6 +2640,7 @@ pub fn run() {
             sip_reject,
             sip_hangup,
             sip_hold,
+            sip_set_audio_levels,
             sip_transfer,
             sip_mute,
             sip_dtmf,

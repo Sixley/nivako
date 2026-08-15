@@ -36,7 +36,9 @@ const defaultSettings: Settings = {
   selectedSpeakerId: "",
   launchAtStartup: false,
   doNotDisturb: false,
-  closeToTray: true
+  closeToTray: true,
+  speakerVolume: 85,
+  microphoneVolume: 70
 };
 
 let settings = loadSettings(defaultSettings);
@@ -765,6 +767,8 @@ function renderSettingsModal(): string {
       <form class="settings-list compact-settings" id="audio-form">
         <label><span>Mikrofon</span><select name="selectedMicrophoneId"><option value="">Systemstandard</option>${inputOptions}</select></label>
         <label><span>Lautsprecher</span><select name="selectedSpeakerId"><option value="">Systemstandard</option>${outputOptions}</select></label>
+        <label><span>Lautstärke (${settings.speakerVolume} %)</span><input name="speakerVolume" type="range" min="0" max="100" value="${settings.speakerVolume}" /></label>
+        <label><span>Mikrofonpegel (${settings.microphoneVolume} %)</span><input name="microphoneVolume" type="range" min="0" max="100" value="${settings.microphoneVolume}" /></label>
         <div class="modal-row"><button class="secondary" type="button" id="refresh-audio">Geräte aktualisieren</button><button class="primary" type="submit">Audio speichern</button></div>
       </form>
       <h2>Konten</h2>
@@ -971,7 +975,9 @@ function bindEvents(): void {
       selectedSpeakerId: settings.selectedSpeakerId,
       launchAtStartup: form.get("launchAtStartup") === "on",
       doNotDisturb: form.get("doNotDisturb") === "on",
-      closeToTray: form.get("closeToTray") === "on"
+      closeToTray: form.get("closeToTray") === "on",
+      speakerVolume: settings.speakerVolume,
+      microphoneVolume: settings.microphoneVolume
     };
     cardDavPassword = String(form.get("cardDavPassword") || "");
     sipPassword = String(form.get("sipPassword") || "");
@@ -1003,9 +1009,14 @@ function bindEvents(): void {
     settings = {
       ...settings,
       selectedMicrophoneId: String(form.get("selectedMicrophoneId") || ""),
-      selectedSpeakerId: String(form.get("selectedSpeakerId") || "")
+      selectedSpeakerId: String(form.get("selectedSpeakerId") || ""),
+      speakerVolume: Number(form.get("speakerVolume") || settings.speakerVolume),
+      microphoneVolume: Number(form.get("microphoneVolume") || settings.microphoneVolume)
     };
     saveSettings(settings);
+    if (isTauriRuntime()) {
+      void import("@tauri-apps/api/core").then((api) => api.invoke("sip_set_audio_levels", { playback: settings.speakerVolume, microphone: settings.microphoneVolume }));
+    }
     configureTelephony();
     notice = "Audio-Einstellungen gespeichert.";
     settingsOpen = false;
@@ -1030,6 +1041,10 @@ async function boot(): Promise<void> {
   await refreshAudioDevices(false);
   scheduleDesktopMaintenance();
   await startDesktopServices();
+  if (isTauriRuntime()) {
+    const api = await import("@tauri-apps/api/core");
+    await api.invoke("sip_set_audio_levels", { playback: settings.speakerVolume, microphone: settings.microphoneVolume }).catch(() => undefined);
+  }
 }
 
 void boot();
