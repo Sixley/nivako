@@ -110,6 +110,7 @@ let toastTimer: number | undefined;
 let callStartedAt: number | undefined;
 let activeHistoryId: string | undefined;
 let dndRejecting = false;
+let incomingCallRecorded = false;
 
 async function setIncomingWindow(visible: boolean): Promise<void> {
   if (!isTauriRuntime() || incomingWindowVisible === visible) return;
@@ -192,6 +193,7 @@ function normalizeCallState(value: string): SoftphoneState["callState"] {
 }
 
 function applyNativeSipSnapshot(snapshot: NativeSipSnapshot): void {
+  const previousCallState = state.callState;
   const remoteNumber = snapshot.remote_number?.trim() || "";
   const remoteContact = remoteNumber
     ? contacts.find((contact) => contact.phones.some((phone) => phone.normalized === remoteNumber || phone.raw === remoteNumber))
@@ -220,8 +222,14 @@ function applyNativeSipSnapshot(snapshot: NativeSipSnapshot): void {
 
   if (!changed) return;
 
-  if (state.callState !== "active" && nextState.callState === "active") callStartedAt = Date.now();
-  if (state.callState === "active" && nextState.callState === "idle") finishActiveHistory();
+  if (previousCallState !== "ringing" && nextState.callState === "ringing") incomingCallRecorded = false;
+  if (previousCallState !== "active" && nextState.callState === "active") callStartedAt = Date.now();
+  if (previousCallState === "active" && nextState.callState === "idle") finishActiveHistory();
+  if (previousCallState === "ringing" && nextState.callState === "idle" && !incomingCallRecorded) {
+    const number = state.activeNumber || state.remoteIdentity || "eingehend";
+    addHistory("missed", number, state.activeContact?.displayName || state.remoteIdentity || number, "completed");
+    incomingCallRecorded = true;
+  }
 
   sipNotice = nextNotice;
   state = nextState;
@@ -229,6 +237,7 @@ function applyNativeSipSnapshot(snapshot: NativeSipSnapshot): void {
     dndRejecting = true;
     const number = nextState.activeNumber || nextState.remoteIdentity || "eingehend";
     addHistory("missed", number, nextState.activeContact?.displayName || nextState.remoteIdentity || number, "completed");
+    incomingCallRecorded = true;
     void telephony.reject().finally(() => { dndRejecting = false; });
     notice = "Anruf durch Nicht stören abgewiesen.";
   }
@@ -363,6 +372,14 @@ function formatDuration(seconds?: number): string {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
+function callResultText(result?: CallEntry["result"]): string {
+  if (result === "blocked") return "Blockiert";
+  if (result === "started") return "Gestartet";
+  if (result === "failed") return "Fehlgeschlagen";
+  if (result === "completed") return "Beendet";
+  return "";
+}
+
 async function dial(): Promise<void> {
   if (state.callState === "ringing" && telephony.accept) {
     state = { ...state, callState: "active" };
@@ -371,6 +388,7 @@ async function dial(): Promise<void> {
     try {
       await telephony.accept();
       activeHistoryId = addHistory("inbound", state.activeNumber || "eingehend", state.activeContact?.displayName || state.activeNumber || "Eingehender Anruf", "started");
+      incomingCallRecorded = true;
       callStartedAt = Date.now();
     } catch (error) {
       notice = errorMessage(error, "Anruf konnte nicht angenommen werden");
@@ -423,6 +441,7 @@ async function hangup(): Promise<void> {
   if (state.callState === "ringing" && telephony.reject) {
     await telephony.reject();
     addHistory("missed", state.activeNumber || "eingehend", state.remoteIdentity || state.activeNumber || "Eingehender Anruf", "completed");
+    incomingCallRecorded = true;
     state = { ...state, callState: "idle", activeNumber: "", activeContact: undefined, remoteIdentity: undefined };
     notice = "Eingehender Anruf abgelehnt.";
     render();
@@ -637,7 +656,7 @@ function renderHistoryList(emptyText: string): string {
             <strong>${escapeHtml(entry.name)}</strong>
             <small>${escapeHtml(entry.number)}</small>
           </span>
-          <small class="history-meta">${escapeHtml(entry.result || "")}${entry.durationSeconds !== undefined ? ` · ${formatDuration(entry.durationSeconds)}` : ""} · ${escapeHtml(entry.time)}</small>
+          <small class="history-meta">${escapeHtml(callResultText(entry.result))}${entry.durationSeconds !== undefined ? ` · ${formatDuration(entry.durationSeconds)}` : ""} · ${escapeHtml(entry.time)}</small>
         </button>
       `).join("")}
     </div>
@@ -872,7 +891,7 @@ function render(): void {
                 <strong>${escapeHtml(entry.name)}</strong>
                 <small>${escapeHtml(entry.number)}</small>
               </span>
-              <small class="history-meta">${escapeHtml(entry.result || "")}${entry.durationSeconds !== undefined ? ` · ${formatDuration(entry.durationSeconds)}` : ""} · ${escapeHtml(entry.time)}</small>
+              <small class="history-meta">${escapeHtml(callResultText(entry.result))}${entry.durationSeconds !== undefined ? ` · ${formatDuration(entry.durationSeconds)}` : ""} · ${escapeHtml(entry.time)}</small>
             </button>
           `).join("") || '<div class="empty">Noch keine Aktionen</div>'}
         </div>
