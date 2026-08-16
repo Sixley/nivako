@@ -35,6 +35,7 @@ struct NativeSipSnapshot {
     muted: bool,
     remote_number: String,
     remote_display_name: String,
+    has_second_call: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -244,6 +245,7 @@ struct LinphoneSession {
     sip_extension: String,
     audio_profile: String,
     active_call: *mut LinphoneCall,
+    waiting_call: *mut LinphoneCall,
     held: bool,
     muted: bool,
 }
@@ -271,6 +273,7 @@ static SIP_SNAPSHOT: Lazy<Arc<Mutex<NativeSipSnapshot>>> = Lazy::new(|| {
         muted: false,
         remote_number: String::new(),
         remote_display_name: String::new(),
+        has_second_call: false,
     }))
 });
 static SIP_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
@@ -300,6 +303,7 @@ enum SipSidecarCommand {
     Reject,
     Hangup,
     Hold,
+    SwitchCall,
     Mute {
         muted: bool,
     },
@@ -1189,6 +1193,7 @@ fn session_snapshot(session: &LinphoneSession, message: String) -> NativeSipSnap
         muted: session.muted,
         remote_number,
         remote_display_name,
+        has_second_call: !session.waiting_call.is_null(),
     }
 }
 
@@ -1609,6 +1614,7 @@ fn sip_register_linphone(
         sip_extension: sip_extension.to_string(),
         audio_profile,
         active_call: ptr::null_mut(),
+        waiting_call: ptr::null_mut(),
         held: false,
         muted: false,
     };
@@ -1817,6 +1823,10 @@ fn sidecar_reply(command: SipSidecarCommand) -> SipSidecarReply {
                 message: error.to_string(),
             },
         },
+        SipSidecarCommand::SwitchCall => match sip_switch_call() {
+            Ok(status) => SipSidecarReply::Status { status },
+            Err(error) => SipSidecarReply::Error { message: error.to_string() },
+        },
         SipSidecarCommand::Mute { muted } => match sip_mute(muted) {
             Ok(status) => SipSidecarReply::Status { status },
             Err(error) => SipSidecarReply::Error {
@@ -1973,6 +1983,7 @@ fn sip_register(
                     muted: false,
                     remote_number: String::new(),
                     remote_display_name: String::new(),
+                    has_second_call: false,
                 });
                 Ok(status)
             }
@@ -1998,6 +2009,7 @@ fn sip_register(
                     muted: false,
                     remote_number: String::new(),
                     remote_display_name: String::new(),
+                    has_second_call: false,
                 });
                 Ok(NativeSipStatus {
                     registered: false,
@@ -2030,6 +2042,7 @@ fn sip_register(
                     muted: false,
                     remote_number: String::new(),
                     remote_display_name: String::new(),
+                    has_second_call: false,
                 });
                 Ok(NativeSipStatus {
                     registered: false,
@@ -2073,6 +2086,7 @@ fn sip_register(
                     muted: false,
                     remote_number: String::new(),
                     remote_display_name: String::new(),
+                    has_second_call: false,
                 });
                 Ok(NativeSipStatus {
                     registered: false,
@@ -2102,6 +2116,7 @@ fn sip_register(
         muted: false,
         remote_number: String::new(),
         remote_display_name: String::new(),
+        has_second_call: false,
     });
     Ok(NativeSipStatus {
         registered: false,
@@ -2208,7 +2223,11 @@ fn sip_dial(
                 session.audio_profile
             )));
         }
+        if session.held && !session.active_call.is_null() && session.active_call != call {
+            session.waiting_call = session.active_call;
+        }
         session.active_call = call;
+        session.held = false;
         let snapshot = session_snapshot(
             session,
             format!(
@@ -2316,6 +2335,7 @@ fn sip_hangup() -> Result<NativeSipStatus, AppError> {
         unsafe { linphone_core_terminate_all_calls(session.core) };
         tick_core_for(session.core, 5, 80);
         session.active_call = ptr::null_mut();
+        session.waiting_call = ptr::null_mut();
         session.held = false;
         let snapshot = session_snapshot(session, "Anruf beendet.".to_string());
         set_sip_snapshot(snapshot.clone());
@@ -2372,6 +2392,51 @@ fn sip_hold() -> Result<NativeSipStatus, AppError> {
                 "Anruf fortgesetzt.".to_string()
             },
         );
+        set_sip_snapshot(snapshot.clone());
+        Ok(NativeSipStatus {
+            registered: snapshot.registered,
+            message: snapshot.message,
+        })
+    })
+}
+
+#[tauri::command]
+fn sip_switch_call() -> Result<NativeSipStatus, AppError> {
+    if !is_sip_sidecar_process() {
+        return match sip_sidecar_call(SipSidecarCommand::SwitchCall)? {
+            SipSidecarReply::Status { status } => Ok(status),
+            SipSidecarReply::Error { message } => Err(AppError::Message(message)),
+            SipSidecarReply::Snapshot { snapshot } => Ok(NativeSipStatus {
+                registered: snapshot.registered,
+                message: snapshot.message,
+            }),
+        };
+    }
+
+    with_session(|session| {
+        if session.active_call.is_null() || session.waiting_call.is_null() {
+            return Err(AppError::Message(
+                "Zum Wechseln werden zwei Gespräche benötigt".to_string(),
+            ));
+        }
+        let pause_status = unsafe { linphone_core_pause_call(session.core, session.active_call) };
+        if pause_status != 0 {
+            return Err(AppError::Message(
+                "Aktuelles Gespräch konnte nicht gehalten werden".to_string(),
+            ));
+        }
+        tick_core_for(session.core, 4, 80);
+        let resume_status = unsafe { linphone_core_resume_call(session.core, session.waiting_call) };
+        if resume_status != 0 {
+            let _ = unsafe { linphone_core_resume_call(session.core, session.active_call) };
+            return Err(AppError::Message(
+                "Gehaltenes Gespräch konnte nicht fortgesetzt werden".to_string(),
+            ));
+        }
+        std::mem::swap(&mut session.active_call, &mut session.waiting_call);
+        session.held = false;
+        tick_core_for(session.core, 8, 80);
+        let snapshot = session_snapshot(session, "Gespräch gewechselt.".to_string());
         set_sip_snapshot(snapshot.clone());
         Ok(NativeSipStatus {
             registered: snapshot.registered,
@@ -2640,6 +2705,7 @@ pub fn run() {
             sip_reject,
             sip_hangup,
             sip_hold,
+            sip_switch_call,
             sip_set_audio_levels,
             sip_transfer,
             sip_mute,

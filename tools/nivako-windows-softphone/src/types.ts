@@ -71,4 +71,5 @@ export interface NativeSipSnapshot {
   muted: boolean;
   remote_number: string;
   remote_display_name: string;
+  has_second_call: boolean;
 }

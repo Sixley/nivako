@@ -90,6 +90,9 @@ let hasStoredSipPassword = false;
 let query = "";
 let activeView: View = "contacts";
 let settingsOpen = false;
+let callAction: "transfer" | "second" | null = null;
+let callActionQuery = "";
+let hasSecondCall = false;
 let cardDavTimer: number | undefined;
 let sipReconnectTimer: number | undefined;
 let sipStatusTimer: number | undefined;
@@ -218,7 +221,8 @@ function applyNativeSipSnapshot(snapshot: NativeSipSnapshot): void {
     || Boolean(state.muted) !== Boolean(nextState.muted)
     || state.activeNumber !== nextState.activeNumber
     || state.activeContact?.id !== nextState.activeContact?.id
-    || state.remoteIdentity !== nextState.remoteIdentity;
+    || state.remoteIdentity !== nextState.remoteIdentity
+    || hasSecondCall !== snapshot.has_second_call;
 
   if (!changed) return;
 
@@ -232,6 +236,7 @@ function applyNativeSipSnapshot(snapshot: NativeSipSnapshot): void {
   }
 
   sipNotice = nextNotice;
+  hasSecondCall = snapshot.has_second_call;
   state = nextState;
   if (settings.doNotDisturb && nextState.callState === "ringing" && !dndRejecting && telephony.reject) {
     dndRejecting = true;
@@ -473,9 +478,8 @@ async function toggleMute(): Promise<void> {
   render();
 }
 
-async function transferCall(): Promise<void> {
+async function transferCall(target: string): Promise<void> {
   if (!telephony.transfer) return;
-  const target = window.prompt("An welche Nummer soll der Anruf weitergeleitet werden?")?.trim();
   if (!target) return;
   try {
     await telephony.transfer(target);
@@ -486,8 +490,7 @@ async function transferCall(): Promise<void> {
   render();
 }
 
-async function startSecondCall(): Promise<void> {
-  const target = window.prompt("Nummer für den zweiten Anruf")?.trim();
+async function startSecondCall(target: string): Promise<void> {
   if (!target) return;
   try {
     if (state.callState === "active") await telephony.hold();
@@ -498,6 +501,33 @@ async function startSecondCall(): Promise<void> {
     notice = errorMessage(error, "Zweiter Anruf konnte nicht aufgebaut werden");
   }
   render();
+}
+
+async function switchCall(): Promise<void> {
+  if (!telephony.switchCall) return;
+  try {
+    await telephony.switchCall();
+    const snapshot = await getSipStatusNative();
+    applyNativeSipSnapshot(snapshot);
+    notice = "Aktives Gespräch gewechselt.";
+  } catch (error) {
+    notice = errorMessage(error, "Gespräch konnte nicht gewechselt werden");
+  }
+  render();
+}
+
+function renderCallActionModal(): string {
+  if (!callAction) return "";
+  const matches = searchContacts(contacts, callActionQuery).filter((contact) => contact.phones.length > 0).slice(0, 6);
+  const title = callAction === "transfer" ? "Anruf weiterleiten" : "Zweiten Anruf starten";
+  return `<div class="call-action-backdrop"><section class="call-action-modal" role="dialog" aria-modal="true" aria-labelledby="call-action-title">
+    <header><div><h1 id="call-action-title">${title}</h1><p>Nummer eingeben oder Kontakt auswählen</p></div><button class="modal-close" id="close-call-action" aria-label="Schließen">×</button></header>
+    <form id="call-action-form">
+      <input class="search" id="call-action-target" name="target" value="${escapeHtml(callActionQuery)}" placeholder="Name oder Rufnummer" autofocus />
+      <div class="call-target-results">${matches.map((contact) => contact.phones.map((phone) => `<button type="button" data-call-target="${escapeHtml(phone.raw)}"><strong>${escapeHtml(contact.displayName)}</strong><small>${escapeHtml(phone.raw)}</small></button>`).join("")).join("")}</div>
+      <div class="modal-row"><button class="secondary" type="button" id="cancel-call-action">Abbrechen</button><button class="primary" type="submit">${callAction === "transfer" ? "Weiterleiten" : "Anrufen"}</button></div>
+    </form>
+  </section></div>`;
 }
 
 function appendDigit(digit: string): void {
@@ -879,6 +909,7 @@ function render(): void {
             <button class="secondary" id="mute" ${state.callState === "idle" ? "disabled" : ""}>${state.muted ? "Mikro an" : "Stumm"}</button>
             <button class="secondary" id="transfer" ${state.callState === "active" || state.callState === "held" ? "" : "disabled"}>Weiterleiten</button>
             <button class="secondary" id="second-call" ${state.callState === "active" ? "" : "disabled"}>Zweiter Anruf</button>
+            ${hasSecondCall ? '<button class="secondary active" id="switch-call">Gespräch wechseln</button>' : ""}
           </div>
         </div>
 
@@ -899,6 +930,7 @@ function render(): void {
       ${showToast ? `<div class="toast ${notificationTone(notice)}" role="status"><strong>${escapeHtml(notice)}</strong></div>` : ""}
       ${state.callState === "ringing" ? `<div class="in-app-call-backdrop"><section class="in-app-call" role="dialog" aria-modal="true"><div class="incoming-avatar">${state.activeContact?.photoUrl ? `<img src="${escapeHtml(state.activeContact.photoUrl)}" alt="" />` : escapeHtml(incomingInitials)}</div><div class="incoming-copy"><span>Eingehender Anruf</span><strong>${escapeHtml(incomingName)}</strong><small>${escapeHtml(state.activeNumber || state.remoteIdentity || "")}</small></div><div class="incoming-actions"><button class="danger" id="overlay-reject">Ablehnen</button><button class="primary" id="overlay-accept">Annehmen</button></div></section></div>` : ""}
       ${settingsOpen ? renderSettingsModal() : ""}
+      ${renderCallActionModal()}
     </section>
   `;
 
@@ -967,8 +999,30 @@ function bindEvents(): void {
   document.querySelector<HTMLButtonElement>("#register-sip")?.addEventListener("click", () => void registerSip());
   document.querySelector<HTMLButtonElement>("#hold")?.addEventListener("click", () => void holdCall());
   document.querySelector<HTMLButtonElement>("#mute")?.addEventListener("click", () => void toggleMute());
-  document.querySelector<HTMLButtonElement>("#transfer")?.addEventListener("click", () => void transferCall());
-  document.querySelector<HTMLButtonElement>("#second-call")?.addEventListener("click", () => void startSecondCall());
+  document.querySelector<HTMLButtonElement>("#transfer")?.addEventListener("click", () => { callAction = "transfer"; callActionQuery = ""; render(); });
+  document.querySelector<HTMLButtonElement>("#second-call")?.addEventListener("click", () => { callAction = "second"; callActionQuery = ""; render(); });
+  document.querySelector<HTMLButtonElement>("#switch-call")?.addEventListener("click", () => void switchCall());
+  const closeCallAction = () => { callAction = null; callActionQuery = ""; render(); };
+  document.querySelector<HTMLButtonElement>("#close-call-action")?.addEventListener("click", closeCallAction);
+  document.querySelector<HTMLButtonElement>("#cancel-call-action")?.addEventListener("click", closeCallAction);
+  document.querySelector<HTMLInputElement>("#call-action-target")?.addEventListener("input", (event) => {
+    const input = event.target as HTMLInputElement;
+    callActionQuery = input.value;
+    renderAndRestoreInput("#call-action-target", input.selectionStart, input.selectionEnd);
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-call-target]").forEach((button) => button.addEventListener("click", () => {
+    callActionQuery = button.dataset.callTarget || "";
+    render();
+  }));
+  document.querySelector<HTMLFormElement>("#call-action-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const target = String(new FormData(event.currentTarget as HTMLFormElement).get("target") || "").trim();
+    const action = callAction;
+    callAction = null;
+    callActionQuery = "";
+    if (action === "transfer") void transferCall(target);
+    if (action === "second") void startSecondCall(target);
+  });
   document.querySelector<HTMLButtonElement>("#backspace")?.addEventListener("click", deleteDigit);
   document.querySelector<HTMLButtonElement>("#sync-carddav")?.addEventListener("click", () => void syncCardDav());
   document.querySelector<HTMLButtonElement>("#refresh-audio")?.addEventListener("click", () => void refreshAudioDevices(true));

@@ -5,6 +5,7 @@ export interface TelephonyAdapter {
   reject?(): Promise<void>;
   hangup(): Promise<void>;
   hold(): Promise<void>;
+  switchCall?(): Promise<void>;
   mute?(): Promise<void>;
   unmute?(): Promise<void>;
   sendDtmf(digit: string): Promise<void>;
