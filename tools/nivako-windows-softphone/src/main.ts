@@ -105,6 +105,8 @@ let notice = isTauriRuntime()
   : "Bereit. CardDAV kann synchronisiert werden; echte Anrufe bleiben blockiert, solange der Anrufschutz aktiv ist.";
 let sipNotice = "SIP nicht registriert.";
 let syncState: "idle" | "syncing" | "ok" | "error" = "idle";
+let lastCardDavSyncAt = Number(localStorage.getItem("nivako-softphone.carddav-last-sync-at")) || 0;
+let lastCardDavSyncCount = Number(localStorage.getItem("nivako-softphone.carddav-last-sync-count")) || 0;
 let state: SoftphoneState = {
   registered: false,
   activeNumber: "",
@@ -729,7 +731,6 @@ function toggleFavorite(contactId: string): void {
 
 async function syncCardDav(): Promise<void> {
   syncState = "syncing";
-  notice = "Synchronisiere CardDAV-Kontakte...";
   render();
 
   try {
@@ -739,7 +740,10 @@ async function syncCardDav(): Promise<void> {
     contacts = applyFavorites(contactsWithPhones, favoriteIds);
     persistContacts();
     syncState = "ok";
-    notice = `CardDAV aktualisiert: ${contactsWithPhones.length} Kontakte mit Telefonnummer.`;
+    lastCardDavSyncAt = Date.now();
+    lastCardDavSyncCount = contactsWithPhones.length;
+    localStorage.setItem("nivako-softphone.carddav-last-sync-at", String(lastCardDavSyncAt));
+    localStorage.setItem("nivako-softphone.carddav-last-sync-count", String(lastCardDavSyncCount));
   } catch (error) {
     syncState = "error";
     notice = "Kontakte konnten nicht aktualisiert werden. Bitte CardDAV-Einstellungen prüfen.";
@@ -1028,6 +1032,11 @@ function renderSettingsModal(): string {
         <button class="secondary" id="sync-carddav" ${syncState === "syncing" ? "disabled" : ""}>${syncState === "syncing" ? "Kontakte werden aktualisiert …" : "CardDAV jetzt aktualisieren"}</button>
         <label class="file-button">vCard-Datei importieren<input id="vcard-import" type="file" accept=".vcf,text/vcard,text/x-vcard" /></label>
       </div>
+      <p class="settings-status">${syncState === "syncing"
+        ? "CardDAV wird gerade aktualisiert …"
+        : lastCardDavSyncAt
+          ? `Zuletzt erfolgreich synchronisiert: ${new Date(lastCardDavSyncAt).toLocaleString("de-DE")} · ${lastCardDavSyncCount} Kontakte mit Telefonnummer`
+          : "CardDAV wurde noch nicht erfolgreich synchronisiert."}</p>
     </div>
   </section></div>`;
 }
