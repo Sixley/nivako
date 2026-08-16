@@ -59,6 +59,7 @@ export interface Settings {
   closeToTray: boolean;
   speakerVolume: number;
   microphoneVolume: number;
+  ringtone: "standard" | "soft" | "bright" | "silent";
 }
 
 export interface NativeSipStatus {

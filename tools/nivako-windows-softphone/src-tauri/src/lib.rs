@@ -2680,7 +2680,13 @@ fn sip_transfer(target: String) -> Result<NativeSipStatus, AppError> {
         };
     }
     with_session(|session| {
-        let call = unsafe { linphone_core_get_current_call(session.core) };
+        // liblinphone's current call can briefly point at the held line while a
+        // second call is active. User actions always target our tracked active line.
+        let call = if !session.active_call.is_null() {
+            session.active_call
+        } else {
+            unsafe { linphone_core_get_current_call(session.core) }
+        };
         if call.is_null() { return Err(AppError::Message("Kein aktiver Anruf zum Weiterleiten".to_string())); }
         let domain = normalize_domain(&session.sip_server);
         let destination = if target.trim().to_lowercase().starts_with("sip:") {
@@ -2704,6 +2710,11 @@ fn sip_transfer(target: String) -> Result<NativeSipStatus, AppError> {
             ));
         }
         tick_core_for(session.core, 5, 80);
+        // The transferred call can be released asynchronously by the core. Do not
+        // keep a raw pointer to it; this previously made later status polling crash
+        // the SIP sidecar and looked like a lost registration in the UI.
+        session.active_call = ptr::null_mut();
+        session.held = false;
         let snapshot = session_snapshot(session, "Anruf wird weitergeleitet.".to_string());
         set_sip_snapshot(snapshot.clone());
         Ok(NativeSipStatus { registered: snapshot.registered, message: snapshot.message })
@@ -2728,6 +2739,11 @@ fn sip_attended_transfer() -> Result<NativeSipStatus, AppError> {
             return Err(AppError::Message("Rückfrage-Übergabe wurde von liblinphone abgelehnt.".to_string()));
         }
         tick_core_for(session.core, 8, 80);
+        // Both local call legs are handed to the remote parties and may be freed
+        // immediately after REFER succeeds. Clear tracked pointers before polling.
+        session.active_call = ptr::null_mut();
+        session.waiting_call = ptr::null_mut();
+        session.held = false;
         let snapshot = session_snapshot(session, "Rückfrage-Übergabe gestartet.".to_string());
         set_sip_snapshot(snapshot.clone());
         Ok(NativeSipStatus { registered: snapshot.registered, message: snapshot.message })

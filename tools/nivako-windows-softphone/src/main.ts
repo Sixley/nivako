@@ -38,7 +38,8 @@ const defaultSettings: Settings = {
   doNotDisturb: false,
   closeToTray: true,
   speakerVolume: 85,
-  microphoneVolume: 70
+  microphoneVolume: 70,
+  ringtone: "standard"
 };
 
 let settings = loadSettings(defaultSettings);
@@ -92,7 +93,7 @@ let historyQuery = "";
 let historyFilter: "all" | CallEntry["direction"] = "all";
 let activeView: View = "contacts";
 let settingsOpen = false;
-let appVersion = "0.6.0";
+let appVersion = "0.7.0";
 let callAction: "transfer" | "second" | null = null;
 let callActionQuery = "";
 let hasSecondCall = false;
@@ -125,6 +126,39 @@ let callStartedAt: number | undefined;
 let activeHistoryId: string | undefined;
 let dndRejecting = false;
 let incomingCallRecorded = false;
+let editingHistoryId: string | null = null;
+let assigningHistoryId: string | null = null;
+let microphoneRecordingUrl = "";
+let ringtoneTimer: number | undefined;
+
+function stopRingtone(): void {
+  if (ringtoneTimer !== undefined) window.clearInterval(ringtoneTimer);
+  ringtoneTimer = undefined;
+}
+
+function playRingtonePulse(): void {
+  if (settings.ringtone === "silent") return;
+  const context = new AudioContext();
+  const gain = context.createGain();
+  gain.gain.value = Math.max(0.03, settings.speakerVolume / 100 * 0.12);
+  gain.connect(context.destination);
+  const frequencies = settings.ringtone === "soft" ? [440, 554] : settings.ringtone === "bright" ? [740, 988] : [620, 780];
+  frequencies.forEach((frequency, index) => {
+    const oscillator = context.createOscillator();
+    oscillator.frequency.value = frequency;
+    oscillator.connect(gain);
+    oscillator.start(context.currentTime + index * 0.22);
+    oscillator.stop(context.currentTime + index * 0.22 + 0.18);
+  });
+  window.setTimeout(() => void context.close(), 800);
+}
+
+function setRingtoneActive(active: boolean): void {
+  stopRingtone();
+  if (!active || settings.ringtone === "silent") return;
+  playRingtonePulse();
+  ringtoneTimer = window.setInterval(playRingtonePulse, 3200);
+}
 
 async function setIncomingWindow(visible: boolean): Promise<void> {
   if (!isTauriRuntime() || incomingWindowVisible === visible) return;
@@ -238,7 +272,11 @@ function applyNativeSipSnapshot(snapshot: NativeSipSnapshot): void {
 
   if (!changed) return;
 
-  if (previousCallState !== "ringing" && nextState.callState === "ringing") incomingCallRecorded = false;
+  if (previousCallState !== "ringing" && nextState.callState === "ringing") {
+    incomingCallRecorded = false;
+    setRingtoneActive(true);
+  }
+  if (previousCallState === "ringing" && nextState.callState !== "ringing") setRingtoneActive(false);
   if (previousCallState !== "active" && nextState.callState === "active") callStartedAt = Date.now();
   if (previousCallState === "active" && nextState.callState === "idle") finishActiveHistory();
   if (previousCallState === "ringing" && nextState.callState === "idle" && !incomingCallRecorded) {
@@ -780,6 +818,29 @@ async function testMicrophone(): Promise<void> {
   }
 }
 
+async function recordMicrophoneSample(): Promise<void> {
+  try {
+    if (microphoneRecordingUrl) URL.revokeObjectURL(microphoneRecordingUrl);
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: settings.selectedMicrophoneId ? { deviceId: { exact: settings.selectedMicrophoneId } } : true });
+    const chunks: BlobPart[] = [];
+    const recorder = new MediaRecorder(stream);
+    recorder.addEventListener("dataavailable", (event) => { if (event.data.size) chunks.push(event.data); });
+    recorder.addEventListener("stop", () => {
+      stream.getTracks().forEach((track) => track.stop());
+      microphoneRecordingUrl = URL.createObjectURL(new Blob(chunks, { type: recorder.mimeType || "audio/webm" }));
+      notice = "Testaufnahme ist bereit zur Wiedergabe.";
+      render();
+    });
+    recorder.start();
+    notice = "Mikrofon wird 5 Sekunden aufgenommen …";
+    render();
+    window.setTimeout(() => recorder.state === "recording" && recorder.stop(), 5000);
+  } catch (error) {
+    notice = errorMessage(error, "Testaufnahme konnte nicht gestartet werden");
+    render();
+  }
+}
+
 function handleKeyboardShortcut(event: KeyboardEvent): void {
   const target = event.target as HTMLElement | null;
   const editing = target?.matches("input, textarea, select") || target?.isContentEditable;
@@ -950,10 +1011,51 @@ function renderHistoryList(emptyText: string): string {
             <small>${escapeHtml(entry.number)}</small>
           </span>
           <small class="history-meta">${escapeHtml(callResultText(entry.result))}${entry.durationSeconds !== undefined ? ` · ${formatDuration(entry.durationSeconds)}` : ""} · ${escapeHtml(entry.time)}</small>
-        </button><button class="history-callback ${entry.callbackRequested ? "active" : ""}" data-callback-id="${escapeHtml(entry.id)}">${entry.callbackRequested ? "Rückruf erledigt" : "Rückruf markieren"}</button></div>
+        </button><div class="history-actions"><button class="history-callback ${entry.callbackRequested ? "active" : ""}" data-callback-id="${escapeHtml(entry.id)}">${entry.callbackRequested ? "Rückruf erledigt" : "Rückruf markieren"}</button><button class="history-callback" data-note-id="${escapeHtml(entry.id)}">${entry.note ? "Notiz bearbeiten" : "Notiz"}</button><button class="history-callback" data-assign-id="${escapeHtml(entry.id)}">Kontakt zuordnen</button></div>${entry.note ? `<p class="history-note">${escapeHtml(entry.note)}</p>` : ""}</div>
       `).join("")}
     </div>
   `;
+}
+
+function renderHistoryNoteModal(): string {
+  if (!editingHistoryId) return "";
+  const entry = callHistory.find((candidate) => candidate.id === editingHistoryId);
+  if (!entry) return "";
+  return `<div class="settings-modal-backdrop"><section class="phone-picker" role="dialog" aria-modal="true"><header><div><h1>Gesprächsnotiz</h1><p>${escapeHtml(entry.name)} · ${escapeHtml(entry.number)}</p></div><button class="modal-close" id="close-history-note">×</button></header><form id="history-note-form" class="settings-list"><textarea name="note" rows="5" placeholder="Ergebnis oder nächste Schritte festhalten">${escapeHtml(entry.note || "")}</textarea><div class="modal-row"><button class="secondary" type="button" id="cancel-history-note">Abbrechen</button><button class="primary" type="submit">Notiz speichern</button></div></form></section></div>`;
+}
+
+function renderHistoryAssignmentModal(): string {
+  if (!assigningHistoryId) return "";
+  const entry = callHistory.find((candidate) => candidate.id === assigningHistoryId);
+  if (!entry) return "";
+  const matches = searchContacts(contacts, entry.name === entry.number ? "" : entry.name).slice(0, 12);
+  return `<div class="settings-modal-backdrop"><section class="phone-picker" role="dialog" aria-modal="true"><header><div><h1>Nummer zuordnen</h1><p>${escapeHtml(entry.number)} einem Kontakt hinzufügen</p></div><button class="modal-close" id="close-history-assignment">×</button></header><div class="phone-picker-list">${matches.map((contact) => `<button type="button" data-assign-contact="${escapeHtml(contact.id)}"><span><strong>${escapeHtml(contact.displayName)}</strong><small>${escapeHtml(contact.organization || contact.email || "Kontakt")}</small></span><b>Hinzufügen</b></button>`).join("") || "<p>Keine Kontakte gefunden.</p>"}</div></section></div>`;
+}
+
+async function assignHistoryNumberToContact(contactId: string): Promise<void> {
+  const entry = callHistory.find((candidate) => candidate.id === assigningHistoryId);
+  const contact = contacts.find((candidate) => candidate.id === contactId);
+  if (!entry || !contact) return;
+  const normalized = normalizePhoneNumber(entry.number);
+  if (contact.phones.some((phone) => phone.normalized === normalized)) {
+    assigningHistoryId = null;
+    notice = "Diese Nummer gehört bereits zum Kontakt.";
+    render();
+    return;
+  }
+  let updated: Contact = { ...contact, phones: [...contact.phones, { label: "other", raw: entry.number, normalized }] };
+  try {
+    if (isTauriRuntime()) updated = await writeCardDavContactNative(settings, updated, cardDavPassword);
+    contacts = contacts.map((candidate) => candidate.id === contactId ? updated : candidate);
+    callHistory = callHistory.map((candidate) => candidate.number === entry.number ? { ...candidate, name: updated.displayName } : candidate);
+    persistContacts();
+    saveHistory(callHistory);
+    assigningHistoryId = null;
+    notice = `Nummer wurde ${updated.displayName} zugeordnet.`;
+  } catch (error) {
+    notice = errorMessage(error, "Nummer konnte nicht zugeordnet werden");
+  }
+  render();
 }
 
 function renderMainPanel(visibleContacts: Contact[]): string {
@@ -1084,7 +1186,8 @@ function renderSettingsModal(): string {
         <label><span>Lautsprecher</span><select name="selectedSpeakerId"><option value="">Systemstandard</option>${outputOptions}</select></label>
         <label><span id="speaker-volume-label">Lautstärke (${settings.speakerVolume} %)</span><input name="speakerVolume" type="range" min="0" max="100" value="${settings.speakerVolume}" /></label>
         <label><span id="microphone-volume-label">Mikrofonpegel (${settings.microphoneVolume} %)</span><input name="microphoneVolume" type="range" min="0" max="100" value="${settings.microphoneVolume}" /></label>
-        <div class="microphone-meter"><i id="microphone-test-level"></i></div><div class="modal-row"><button class="secondary" type="button" id="test-microphone">Mikrofon testen</button><button class="secondary" type="button" id="test-speaker">Testton</button><button class="secondary" type="button" id="refresh-audio">Geräte aktualisieren</button><button class="primary" type="submit">Audio speichern</button></div>
+        <label><span>Klingelton</span><select name="ringtone"><option value="standard" ${settings.ringtone === "standard" ? "selected" : ""}>NIVAKO Standard</option><option value="soft" ${settings.ringtone === "soft" ? "selected" : ""}>Sanft</option><option value="bright" ${settings.ringtone === "bright" ? "selected" : ""}>Klar</option><option value="silent" ${settings.ringtone === "silent" ? "selected" : ""}>Lautlos</option></select></label>
+        <div class="microphone-meter"><i id="microphone-test-level"></i></div><div class="modal-row"><button class="secondary" type="button" id="test-microphone">Pegel testen</button><button class="secondary" type="button" id="record-microphone">5-Sek.-Aufnahme</button>${microphoneRecordingUrl ? `<audio class="microphone-playback" controls src="${escapeHtml(microphoneRecordingUrl)}"></audio>` : ""}<button class="secondary" type="button" id="test-ringtone">Klingelton testen</button><button class="secondary" type="button" id="test-speaker">Testton</button><button class="secondary" type="button" id="refresh-audio">Geräte aktualisieren</button><button class="primary" type="submit">Audio speichern</button></div>
       </form>
       <h2>Konten</h2>
       <form class="settings-list compact-settings" id="settings-form">
@@ -1197,6 +1300,8 @@ function render(): void {
       ${renderContactMenu()}
       ${renderPhonePicker()}
       ${renderContactEditor()}
+      ${renderHistoryNoteModal()}
+      ${renderHistoryAssignmentModal()}
     </section>
   `;
 
@@ -1409,6 +1514,8 @@ function bindEvents(): void {
   document.querySelector<HTMLButtonElement>("#refresh-audio")?.addEventListener("click", () => void refreshAudioDevices(true));
   document.querySelector<HTMLButtonElement>("#test-speaker")?.addEventListener("click", () => void testSpeaker());
   document.querySelector<HTMLButtonElement>("#test-microphone")?.addEventListener("click", () => void testMicrophone());
+  document.querySelector<HTMLButtonElement>("#record-microphone")?.addEventListener("click", () => void recordMicrophoneSample());
+  document.querySelector<HTMLButtonElement>("#test-ringtone")?.addEventListener("click", playRingtonePulse);
   document.querySelector<HTMLButtonElement>("#clear-history")?.addEventListener("click", () => {
     callHistory = [];
     saveHistory(callHistory);
@@ -1419,6 +1526,28 @@ function bindEvents(): void {
     saveHistory(callHistory);
     render();
   }));
+  document.querySelectorAll<HTMLButtonElement>("[data-note-id]").forEach((button) => button.addEventListener("click", () => {
+    editingHistoryId = button.dataset.noteId || null;
+    render();
+  }));
+  document.querySelectorAll<HTMLButtonElement>("[data-assign-id]").forEach((button) => button.addEventListener("click", () => {
+    assigningHistoryId = button.dataset.assignId || null;
+    render();
+  }));
+  const closeHistoryNote = () => { editingHistoryId = null; render(); };
+  document.querySelector<HTMLButtonElement>("#close-history-note")?.addEventListener("click", closeHistoryNote);
+  document.querySelector<HTMLButtonElement>("#cancel-history-note")?.addEventListener("click", closeHistoryNote);
+  document.querySelector<HTMLFormElement>("#history-note-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const note = String(new FormData(event.currentTarget as HTMLFormElement).get("note") || "").trim();
+    callHistory = callHistory.map((entry) => entry.id === editingHistoryId ? { ...entry, note: note || undefined } : entry);
+    saveHistory(callHistory);
+    editingHistoryId = null;
+    notice = "Gesprächsnotiz gespeichert.";
+    render();
+  });
+  document.querySelector<HTMLButtonElement>("#close-history-assignment")?.addEventListener("click", () => { assigningHistoryId = null; render(); });
+  document.querySelectorAll<HTMLButtonElement>("[data-assign-contact]").forEach((button) => button.addEventListener("click", () => void assignHistoryNumberToContact(button.dataset.assignContact || "")));
   document.querySelector<HTMLInputElement>("#vcard-import")?.addEventListener("change", (event) => {
     const file = (event.target as HTMLInputElement).files?.[0];
     if (file) void importVCards(file);
@@ -1446,7 +1575,8 @@ function bindEvents(): void {
       doNotDisturb: settings.doNotDisturb,
       closeToTray: form.get("closeToTray") === "on",
       speakerVolume: settings.speakerVolume,
-      microphoneVolume: settings.microphoneVolume
+      microphoneVolume: settings.microphoneVolume,
+      ringtone: settings.ringtone
     };
     cardDavPassword = String(form.get("cardDavPassword") || "");
     sipPassword = String(form.get("sipPassword") || "");
@@ -1479,7 +1609,8 @@ function bindEvents(): void {
       selectedMicrophoneId: String(form.get("selectedMicrophoneId") || ""),
       selectedSpeakerId: String(form.get("selectedSpeakerId") || ""),
       speakerVolume: Number(form.get("speakerVolume") || settings.speakerVolume),
-      microphoneVolume: Number(form.get("microphoneVolume") || settings.microphoneVolume)
+      microphoneVolume: Number(form.get("microphoneVolume") || settings.microphoneVolume),
+      ringtone: String(form.get("ringtone") || settings.ringtone) as Settings["ringtone"]
     };
     saveSettings(settings);
     if (isTauriRuntime()) {
