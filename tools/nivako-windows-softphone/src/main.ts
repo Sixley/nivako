@@ -23,8 +23,8 @@ const sipStatusPollMs = 2000;
 type View = "contacts" | "history" | "favorites" | "audio" | "settings";
 
 const defaultSettings: Settings = {
-  cardDavUrl: "https://threesix.de/remote.php/dav/addressbooks/users/Nivako/nivako-crm/",
-  cardDavUser: "Nivako",
+  cardDavUrl: "https://threesix.de/remote.php/dav/addressbooks/users/hagen.bjoern@nivako.de/nivako-crm/",
+  cardDavUser: "hagen.bjoern@nivako.de",
   sipServer: import.meta.env.VITE_SIP_DOMAIN || "pbx.nivako.de;transport=tcp",
   sipExtension: import.meta.env.VITE_SIP_EXTENSION || "101",
   sipAuthUser: import.meta.env.VITE_SIP_AUTH_USER || "101",
