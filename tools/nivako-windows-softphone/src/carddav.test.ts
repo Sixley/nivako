@@ -62,6 +62,22 @@ TEL;TYPE=CELL;VALUE=uri:tel:+49170123
 END:VCARD`);
     expect(contact.phones[0].raw).toBe("+49170123");
   });
+
+  it("preserves the Espo contact identity when editing a CardDAV contact", () => {
+    const contact = parseVCard(`BEGIN:VCARD
+VERSION:4.0
+UID:espo-contact-abc123@nivako.de
+FN:CRM Kontakt
+X-NIVAKO-ESPO-ID:abc123
+NOTE:EspoCRM Contact ID: abc123
+TEL;TYPE=WORK:+495021123
+END:VCARD`, "/contacts/espo-contact-abc123.vcf");
+    expect(contact.espoId).toBe("abc123");
+    const serialized = serializeVCard(contact);
+    expect(serialized).toContain("X-NIVAKO-ESPO-ID:abc123");
+    expect(serialized).toContain("X-NIVAKO-ORIGIN:ESPO");
+    expect(parseVCard(serialized).espoId).toBe("abc123");
+  });
 });
 
 describe("contact search", () => {

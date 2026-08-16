@@ -67,6 +67,11 @@ export function serializeVCard(contact: Contact): string {
   if (contact.organization) lines.push(`ORG:${escapeVCardValue(contact.organization)}`);
   if (contact.email) lines.push(`EMAIL;TYPE=INTERNET:${escapeVCardValue(contact.email)}`);
   contact.phones.filter((phone) => phone.raw.trim()).forEach((phone) => lines.push(`TEL;TYPE=${phoneTypes(phone)}:${escapeVCardValue(phone.raw.trim())}`));
+  if (contact.espoId) {
+    lines.push(`X-NIVAKO-ESPO-ID:${escapeVCardValue(contact.espoId)}`);
+    lines.push(`NOTE:${escapeVCardValue(`EspoCRM Contact ID: ${contact.espoId}`)}`);
+  }
+  lines.push(`X-NIVAKO-ORIGIN:${contact.espoId ? "ESPO" : "SOFTPHONE"}`);
   lines.push("REV:" + new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z"), "END:VCARD");
   return `${lines.join("\r\n")}\r\n`;
 }
@@ -80,6 +85,7 @@ export function parseVCard(vcard: string, href: string = crypto.randomUUID(), et
   let organization = "";
   let email = "";
   let photoUrl = "";
+  let espoId = "";
 
   for (const line of lines) {
     const property = getPropertyName(line);
@@ -93,6 +99,9 @@ export function parseVCard(vcard: string, href: string = crypto.randomUUID(), et
     }
     if (property === "ORG") organization = value.split(";").filter(Boolean).join(" / ");
     if (property === "EMAIL" && !email) email = value;
+    if (property === "X-NIVAKO-ESPO-ID") espoId = value;
+    if (property === "NOTE" && !espoId) espoId = value.match(/EspoCRM Contact ID:\s*([A-Za-z0-9_-]+)/i)?.[1] || "";
+    if (property === "UID" && !espoId) espoId = value.match(/^espo-contact-([A-Za-z0-9_-]+)@/i)?.[1] || "";
     if (property === "PHOTO" && !photoUrl) {
       if (/^https?:\/\//i.test(value) || value.startsWith("data:image/")) photoUrl = value;
       else if (/^[A-Za-z0-9+/=\s]+$/.test(value)) {
@@ -121,7 +130,8 @@ export function parseVCard(vcard: string, href: string = crypto.randomUUID(), et
     photoUrl: photoUrl || undefined,
     phones: phones.sort((left, right) => Number(Boolean(right.primary)) - Number(Boolean(left.primary))),
     source: "carddav",
-    etag
+    etag,
+    espoId: espoId || undefined
   };
 }
 

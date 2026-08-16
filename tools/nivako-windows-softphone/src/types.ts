@@ -17,6 +17,7 @@ export interface Contact {
   source?: "carddav" | "local";
   photoUrl?: string;
   etag?: string;
+  espoId?: string;
 }
 
 export interface CallEntry {
