@@ -88,9 +88,11 @@ let cardDavPassword = "";
 let hasStoredCardDavPassword = false;
 let hasStoredSipPassword = false;
 let query = "";
+let historyQuery = "";
+let historyFilter: "all" | CallEntry["direction"] = "all";
 let activeView: View = "contacts";
 let settingsOpen = false;
-let appVersion = "0.4.4";
+let appVersion = "0.5.0";
 let callAction: "transfer" | "second" | null = null;
 let callActionQuery = "";
 let hasSecondCall = false;
@@ -724,6 +726,40 @@ function deleteDigit(): void {
   render();
 }
 
+async function testSpeaker(): Promise<void> {
+  const context = new AudioContext();
+  const oscillator = context.createOscillator();
+  const gain = context.createGain();
+  oscillator.frequency.value = 660;
+  gain.gain.value = Math.max(0.05, settings.speakerVolume / 100 * 0.2);
+  oscillator.connect(gain).connect(context.destination);
+  oscillator.start();
+  oscillator.stop(context.currentTime + 0.6);
+  oscillator.addEventListener("ended", () => void context.close());
+  notice = "Testton wird abgespielt.";
+  render();
+}
+
+function handleKeyboardShortcut(event: KeyboardEvent): void {
+  const target = event.target as HTMLElement | null;
+  const editing = target?.matches("input, textarea, select") || target?.isContentEditable;
+  if (event.ctrlKey && event.key.toLowerCase() === "f") {
+    event.preventDefault();
+    activeView = "contacts";
+    render();
+    document.querySelector<HTMLInputElement>("#search")?.focus();
+    return;
+  }
+  if (event.key === "Escape") {
+    settingsOpen = false; callAction = null; phonePicker = null; contactMenu = null;
+    if (editingContactId) closeContactOverlays();
+    render();
+    return;
+  }
+  if (!editing && event.key === "Enter" && state.callState === "idle" && state.activeNumber) void dial();
+  if (!editing && event.key.toLowerCase() === "m" && ["active", "held"].includes(state.callState)) void toggleMute();
+}
+
 function toggleFavorite(contactId: string): void {
   contacts = contacts.map((contact) => contact.id === contactId ? { ...contact, favorite: !contact.favorite } : contact);
   persistContacts();
@@ -861,10 +897,12 @@ function renderContact(contact: Contact): string {
 }
 
 function renderHistoryList(emptyText: string): string {
-  if (callHistory.length === 0) return `<div class="empty large">${emptyText}</div>`;
+  const entries = callHistory.filter((entry) => historyFilter === "all" || entry.direction === historyFilter)
+    .filter((entry) => `${entry.name} ${entry.number}`.toLowerCase().includes(historyQuery.toLowerCase()));
+  if (entries.length === 0) return `<div class="empty large">${emptyText}</div>`;
   return `
     <div class="contact-list">
-      ${callHistory.map((entry) => `
+      ${entries.map((entry) => `
         <button class="history-row" data-number="${escapeHtml(entry.number)}">
           <span class="history-icon">${entry.direction === "missed" ? "!" : entry.direction === "inbound" ? "↓" : "↑"}</span>
           <span class="history-main">
@@ -889,7 +927,9 @@ function renderMainPanel(visibleContacts: Contact[]): string {
           </div>
           <button class="sync-button" id="clear-history">Leeren</button>
         </div>
-        ${renderHistoryList("Noch kein lokaler Verlauf vorhanden.")}
+        <input class="search" id="history-search" placeholder="Verlauf durchsuchen" value="${escapeHtml(historyQuery)}" />
+        <div class="history-filters">${([['all','Alle'],['missed','Verpasst'],['inbound','Eingehend'],['outbound','Ausgehend']] as const).map(([value,label]) => `<button class="${historyFilter === value ? 'active' : ''}" data-history-filter="${value}">${label}</button>`).join("")}</div>
+        ${renderHistoryList("Keine passenden Anrufe vorhanden.")}
       </section>
     `;
   }
@@ -927,7 +967,7 @@ function renderMainPanel(visibleContacts: Contact[]): string {
         <form class="settings-list" id="audio-form">
           <label><span>Mikrofon</span><select name="selectedMicrophoneId"><option value="">Systemstandard</option>${inputOptions}</select></label>
           <label><span>Lautsprecher</span><select name="selectedSpeakerId"><option value="">Systemstandard</option>${outputOptions}</select></label>
-          <button class="primary" type="submit">Audio speichern</button>
+          <div class="modal-row"><button class="secondary" type="button" id="test-speaker">Testton</button><button class="primary" type="submit">Audio speichern</button></div>
         </form>
       </section>
     `;
@@ -1004,7 +1044,7 @@ function renderSettingsModal(): string {
         <label><span>Lautsprecher</span><select name="selectedSpeakerId"><option value="">Systemstandard</option>${outputOptions}</select></label>
         <label><span id="speaker-volume-label">Lautstärke (${settings.speakerVolume} %)</span><input name="speakerVolume" type="range" min="0" max="100" value="${settings.speakerVolume}" /></label>
         <label><span id="microphone-volume-label">Mikrofonpegel (${settings.microphoneVolume} %)</span><input name="microphoneVolume" type="range" min="0" max="100" value="${settings.microphoneVolume}" /></label>
-        <div class="modal-row"><button class="secondary" type="button" id="refresh-audio">Geräte aktualisieren</button><button class="primary" type="submit">Audio speichern</button></div>
+        <div class="modal-row"><button class="secondary" type="button" id="test-speaker">Testton</button><button class="secondary" type="button" id="refresh-audio">Geräte aktualisieren</button><button class="primary" type="submit">Audio speichern</button></div>
       </form>
       <h2>Konten</h2>
       <form class="settings-list compact-settings" id="settings-form">
@@ -1106,7 +1146,7 @@ function render(): void {
 
       </section>
       ${showToast ? `<div class="toast ${notificationTone(notice)}" role="status"><strong>${escapeHtml(notice)}</strong></div>` : ""}
-      ${state.callState === "ringing" ? `<div class="in-app-call-backdrop"><section class="in-app-call" role="dialog" aria-modal="true"><div class="incoming-avatar">${state.activeContact?.photoUrl ? `<img src="${escapeHtml(state.activeContact.photoUrl)}" alt="" />` : escapeHtml(incomingInitials)}</div><div class="incoming-copy"><span>Eingehender Anruf</span><strong>${escapeHtml(incomingName)}</strong><small>${escapeHtml(state.activeNumber || state.remoteIdentity || "")}</small></div><div class="incoming-actions"><button class="danger" id="overlay-reject">Ablehnen</button><button class="primary" id="overlay-accept">Annehmen</button></div></section></div>` : ""}
+      ${state.callState === "ringing" ? `<div class="in-app-call-backdrop"><section class="in-app-call" role="dialog" aria-modal="true"><div class="incoming-avatar">${state.activeContact?.photoUrl ? `<img src="${escapeHtml(state.activeContact.photoUrl)}" alt="" />` : escapeHtml(incomingInitials)}</div><div class="incoming-copy"><span>Eingehender Anruf</span><strong>${escapeHtml(incomingName)}</strong><small>${escapeHtml([state.activeContact?.organization, state.activeNumber || state.remoteIdentity].filter(Boolean).join(" · "))}</small></div><div class="incoming-actions">${state.activeContact ? "" : '<button class="secondary" id="create-incoming-contact">Kontakt anlegen</button>'}<button class="danger" id="overlay-reject">Ablehnen</button><button class="primary" id="overlay-accept">Annehmen</button></div></section></div>` : ""}
       ${settingsOpen ? renderSettingsModal() : ""}
       ${renderCallActionModal()}
       ${renderContactMenu()}
@@ -1234,12 +1274,27 @@ function bindEvents(): void {
   });
   document.querySelector<HTMLButtonElement>("#overlay-accept")?.addEventListener("click", () => void dial());
   document.querySelector<HTMLButtonElement>("#overlay-reject")?.addEventListener("click", () => void hangup());
+  document.querySelector<HTMLButtonElement>("#create-incoming-contact")?.addEventListener("click", () => {
+    const number = state.activeNumber || state.remoteIdentity || "";
+    editingContactId = `local-${crypto.randomUUID()}`;
+    editingContactDraft = { id: editingContactId, displayName: "", phones: [{ label: "work", raw: number, normalized: normalizePhoneNumber(number), primary: true }], source: "local" };
+    render();
+  });
 
   document.querySelector<HTMLInputElement>("#search")?.addEventListener("input", (event) => {
     const input = event.target as HTMLInputElement;
     query = input.value;
     renderAndRestoreInput("#search", input.selectionStart, input.selectionEnd);
   });
+  document.querySelector<HTMLInputElement>("#history-search")?.addEventListener("input", (event) => {
+    const input = event.currentTarget as HTMLInputElement;
+    historyQuery = input.value;
+    renderAndRestoreInput("#history-search", input.selectionStart, input.selectionEnd);
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-history-filter]").forEach((button) => button.addEventListener("click", () => {
+    historyFilter = button.dataset.historyFilter as typeof historyFilter;
+    render();
+  }));
 
   document.querySelector<HTMLInputElement>("#number-input")?.addEventListener("input", (event) => {
     const input = event.target as HTMLInputElement;
@@ -1306,6 +1361,7 @@ function bindEvents(): void {
   document.querySelector<HTMLButtonElement>("#backspace")?.addEventListener("click", deleteDigit);
   document.querySelector<HTMLButtonElement>("#sync-carddav")?.addEventListener("click", () => void syncCardDav());
   document.querySelector<HTMLButtonElement>("#refresh-audio")?.addEventListener("click", () => void refreshAudioDevices(true));
+  document.querySelector<HTMLButtonElement>("#test-speaker")?.addEventListener("click", () => void testSpeaker());
   document.querySelector<HTMLButtonElement>("#clear-history")?.addEventListener("click", () => {
     callHistory = [];
     saveHistory(callHistory);
@@ -1407,6 +1463,7 @@ async function boot(): Promise<void> {
     }
   }
   configureTelephony();
+  window.addEventListener("keydown", handleKeyboardShortcut);
   render();
   await updateCredentialState();
   await refreshAudioDevices(false);
