@@ -230,6 +230,8 @@ extern "C" {
     fn linphone_core_terminate_all_calls(core: *mut LinphoneCore) -> c_int;
     fn linphone_core_pause_call(core: *mut LinphoneCore, call: *mut LinphoneCall) -> c_int;
     fn linphone_core_resume_call(core: *mut LinphoneCore, call: *mut LinphoneCall) -> c_int;
+    fn linphone_core_add_all_to_conference(core: *mut LinphoneCore) -> c_int;
+    fn linphone_core_enter_conference(core: *mut LinphoneCore) -> c_int;
     fn linphone_call_transfer_to(
         call: *mut LinphoneCall,
         refer_to: *const LinphoneAddress,
@@ -308,6 +310,7 @@ enum SipSidecarCommand {
     Hangup,
     Hold,
     SwitchCall,
+    Conference,
     Mute {
         muted: bool,
     },
@@ -1831,6 +1834,10 @@ fn sidecar_reply(command: SipSidecarCommand) -> SipSidecarReply {
             Ok(status) => SipSidecarReply::Status { status },
             Err(error) => SipSidecarReply::Error { message: error.to_string() },
         },
+        SipSidecarCommand::Conference => match sip_conference() {
+            Ok(status) => SipSidecarReply::Status { status },
+            Err(error) => SipSidecarReply::Error { message: error.to_string() },
+        },
         SipSidecarCommand::Mute { muted } => match sip_mute(muted) {
             Ok(status) => SipSidecarReply::Status { status },
             Err(error) => SipSidecarReply::Error {
@@ -2479,6 +2486,49 @@ fn sip_switch_call() -> Result<NativeSipStatus, AppError> {
 }
 
 #[tauri::command]
+fn sip_conference() -> Result<NativeSipStatus, AppError> {
+    if !is_sip_sidecar_process() {
+        return match sip_sidecar_call(SipSidecarCommand::Conference)? {
+            SipSidecarReply::Status { status } => Ok(status),
+            SipSidecarReply::Error { message } => Err(AppError::Message(message)),
+            SipSidecarReply::Snapshot { snapshot } => Ok(NativeSipStatus {
+                registered: snapshot.registered,
+                message: snapshot.message,
+            }),
+        };
+    }
+
+    with_session(|session| {
+        if session.active_call.is_null() || session.waiting_call.is_null() {
+            return Err(AppError::Message(
+                "Für eine Konferenz werden zwei Gespräche benötigt".to_string(),
+            ));
+        }
+        let add_status = unsafe { linphone_core_add_all_to_conference(session.core) };
+        if add_status != 0 {
+            return Err(AppError::Message(format!(
+                "Gespräche konnten nicht zur Konferenz verbunden werden (status={add_status})"
+            )));
+        }
+        tick_core_for(session.core, 6, 80);
+        let enter_status = unsafe { linphone_core_enter_conference(session.core) };
+        if enter_status != 0 {
+            return Err(AppError::Message(format!(
+                "Lokaler Teilnehmer konnte der Konferenz nicht beitreten (status={enter_status})"
+            )));
+        }
+        session.held = false;
+        tick_core_for(session.core, 10, 80);
+        let snapshot = session_snapshot(session, "Konferenz verbunden.".to_string());
+        set_sip_snapshot(snapshot.clone());
+        Ok(NativeSipStatus {
+            registered: snapshot.registered,
+            message: snapshot.message,
+        })
+    })
+}
+
+#[tauri::command]
 fn sip_set_audio_levels(playback: i32, microphone: i32) -> Result<NativeSipStatus, AppError> {
     let playback = playback.clamp(0, 100);
     let microphone = microphone.clamp(0, 100);
@@ -2751,6 +2801,7 @@ pub fn run() {
             sip_hangup,
             sip_hold,
             sip_switch_call,
+            sip_conference,
             sip_set_audio_levels,
             sip_transfer,
             sip_mute,

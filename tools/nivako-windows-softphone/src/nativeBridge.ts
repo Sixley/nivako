@@ -110,6 +110,10 @@ export async function switchCallNative(): Promise<NativeSipStatus> {
   return tauriInvokeWithTimeout<NativeSipStatus>("sip_switch_call", undefined, nativeSipTimeoutMs, "Gesprächswechsel antwortet nicht innerhalb von 15 Sekunden.");
 }
 
+export async function conferenceNative(): Promise<NativeSipStatus> {
+  return tauriInvokeWithTimeout<NativeSipStatus>("sip_conference", undefined, nativeSipTimeoutMs, "Konferenz antwortet nicht innerhalb von 15 Sekunden.");
+}
+
 export async function muteNative(muted: boolean): Promise<NativeSipStatus> {
   return tauriInvokeWithTimeout<NativeSipStatus>("sip_mute", { muted }, nativeSipTimeoutMs, "Stummschalten antwortet nicht innerhalb von 15 Sekunden.");
 }

@@ -6,6 +6,7 @@ export interface TelephonyAdapter {
   hangup(): Promise<void>;
   hold(): Promise<void>;
   switchCall?(): Promise<void>;
+  conference?(): Promise<void>;
   mute?(): Promise<void>;
   unmute?(): Promise<void>;
   sendDtmf(digit: string): Promise<void>;

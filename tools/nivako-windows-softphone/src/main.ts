@@ -522,6 +522,19 @@ async function switchCall(): Promise<void> {
   render();
 }
 
+async function startConference(): Promise<void> {
+  if (!telephony.conference) return;
+  try {
+    await telephony.conference();
+    const snapshot = await getSipStatusNative();
+    applyNativeSipSnapshot(snapshot);
+    notice = "Konferenz verbunden – alle drei Teilnehmer können miteinander sprechen.";
+  } catch (error) {
+    notice = errorMessage(error, "Konferenz konnte nicht verbunden werden");
+  }
+  render();
+}
+
 function renderCallActionModal(): string {
   if (!callAction) return "";
   const matches = searchContacts(contacts, callActionQuery).filter((contact) => contact.phones.length > 0).slice(0, 6);
@@ -916,6 +929,7 @@ function render(): void {
             <button class="secondary" id="transfer" ${state.callState === "active" || state.callState === "held" ? "" : "disabled"}>Weiterleiten</button>
             <button class="secondary" id="second-call" ${state.callState === "active" ? "" : "disabled"}>Zweiter Anruf</button>
             ${hasSecondCall ? '<button class="secondary active" id="switch-call">Gespräch wechseln</button>' : ""}
+            ${hasSecondCall ? '<button class="secondary active" id="conference">Konferenz</button>' : ""}
           </div>
         </div>
 
@@ -1008,6 +1022,7 @@ function bindEvents(): void {
   document.querySelector<HTMLButtonElement>("#transfer")?.addEventListener("click", () => { callAction = "transfer"; callActionQuery = ""; render(); });
   document.querySelector<HTMLButtonElement>("#second-call")?.addEventListener("click", () => { callAction = "second"; callActionQuery = ""; render(); });
   document.querySelector<HTMLButtonElement>("#switch-call")?.addEventListener("click", () => void switchCall());
+  document.querySelector<HTMLButtonElement>("#conference")?.addEventListener("click", () => void startConference());
   const closeCallAction = () => { callAction = null; callActionQuery = ""; render(); };
   document.querySelector<HTMLButtonElement>("#close-call-action")?.addEventListener("click", closeCallAction);
   document.querySelector<HTMLButtonElement>("#cancel-call-action")?.addEventListener("click", closeCallAction);
