@@ -454,8 +454,14 @@ async function hangup(): Promise<void> {
   }
   await telephony.hangup();
   finishActiveHistory();
-  state = { ...state, callState: "idle", activeNumber: "", activeContact: undefined };
-  notice = "Anruf beendet.";
+  const snapshot = await getSipStatusNative();
+  applyNativeSipSnapshot(snapshot);
+  if (snapshot.call_state === "idle") {
+    state = { ...state, callState: "idle", activeNumber: "", activeContact: undefined };
+    notice = "Anruf beendet.";
+  } else {
+    notice = "Aktives Gespräch beendet. Das gehaltene Gespräch wurde fortgesetzt.";
+  }
   render();
 }
 

@@ -226,10 +226,14 @@ extern "C" {
     fn linphone_error_info_get_protocol(info: *const LinphoneErrorInfo) -> *const c_char;
     fn linphone_call_accept(call: *mut LinphoneCall) -> c_int;
     fn linphone_call_decline(call: *mut LinphoneCall, reason: c_int) -> c_int;
+    fn linphone_call_terminate(call: *mut LinphoneCall) -> c_int;
     fn linphone_core_terminate_all_calls(core: *mut LinphoneCore) -> c_int;
     fn linphone_core_pause_call(core: *mut LinphoneCore, call: *mut LinphoneCall) -> c_int;
     fn linphone_core_resume_call(core: *mut LinphoneCore, call: *mut LinphoneCall) -> c_int;
-    fn linphone_call_transfer_to(call: *mut LinphoneCall, refer_to: *const c_char) -> c_int;
+    fn linphone_call_transfer_to(
+        call: *mut LinphoneCall,
+        refer_to: *const LinphoneAddress,
+    ) -> c_int;
     fn linphone_core_enable_mic(core: *mut LinphoneCore, enable: bool_t);
     fn linphone_call_send_dtmf(call: *mut LinphoneCall, dtmf: c_char) -> c_int;
     fn ms_factory_set_plugins_dir(factory: *mut MSFactory, path: *const c_char);
@@ -2332,12 +2336,41 @@ fn sip_hangup() -> Result<NativeSipStatus, AppError> {
     }
 
     with_session(|session| {
-        unsafe { linphone_core_terminate_all_calls(session.core) };
+        let call = if !session.active_call.is_null() {
+            session.active_call
+        } else {
+            unsafe { linphone_core_get_current_call(session.core) }
+        };
+        if call.is_null() {
+            return Err(AppError::Message(
+                "Kein aktiver Anruf zum Auflegen".to_string(),
+            ));
+        }
+        let status = unsafe { linphone_call_terminate(call) };
+        if status != 0 {
+            return Err(AppError::Message(format!(
+                "Auflegen wurde von liblinphone abgelehnt (status={status})"
+            )));
+        }
         tick_core_for(session.core, 5, 80);
-        session.active_call = ptr::null_mut();
+        session.active_call = session.waiting_call;
         session.waiting_call = ptr::null_mut();
         session.held = false;
-        let snapshot = session_snapshot(session, "Anruf beendet.".to_string());
+        let message = if session.active_call.is_null() {
+            "Anruf beendet.".to_string()
+        } else {
+            let resume_status = unsafe {
+                linphone_core_resume_call(session.core, session.active_call)
+            };
+            if resume_status != 0 {
+                return Err(AppError::Message(format!(
+                    "Anruf beendet, aber das verbleibende Gespräch konnte nicht fortgesetzt werden (status={resume_status})"
+                )));
+            }
+            tick_core_for(session.core, 5, 80);
+            "Aktives Gespräch beendet; gehaltenes Gespräch fortgesetzt.".to_string()
+        };
+        let snapshot = session_snapshot(session, message);
         set_sip_snapshot(snapshot.clone());
         Ok(NativeSipStatus {
             registered: snapshot.registered,
@@ -2485,9 +2518,21 @@ fn sip_transfer(target: String) -> Result<NativeSipStatus, AppError> {
         } else {
             format!("sip:{}@{}", target.trim(), domain)
         };
-        let destination = CString::new(destination).map_err(|_| AppError::Message("Ungültiges Weiterleitungsziel".to_string()))?;
-        let status = unsafe { linphone_call_transfer_to(call, destination.as_ptr()) };
-        if status != 0 { return Err(AppError::Message("Weiterleitung wurde von liblinphone abgelehnt".to_string())); }
+        let destination_text = destination;
+        let destination = cstring(&destination_text, "Weiterleitungsziel")?;
+        let address = unsafe { linphone_address_new(destination.as_ptr()) };
+        if address.is_null() {
+            return Err(AppError::Message(format!(
+                "Ungültiges Weiterleitungsziel: {destination_text}"
+            )));
+        }
+        let status = unsafe { linphone_call_transfer_to(call, address) };
+        unsafe { linphone_address_unref(address) };
+        if status != 0 {
+            return Err(AppError::Message(
+                "Weiterleitung wurde von liblinphone abgelehnt".to_string(),
+            ));
+        }
         tick_core_for(session.core, 5, 80);
         let snapshot = session_snapshot(session, "Anruf wird weitergeleitet.".to_string());
         set_sip_snapshot(snapshot.clone());
