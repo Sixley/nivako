@@ -620,6 +620,7 @@ h2 small {
 .compact-settings details[open] summary { margin-bottom: 12px; }
 .modal-row { display: flex; justify-content: flex-end; gap: 10px; }
 .contact-settings-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.app-version { margin: 24px 0 2px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; text-align: center; }
 
 .call-card,
 .history {

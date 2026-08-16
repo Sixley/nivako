@@ -90,6 +90,7 @@ let hasStoredSipPassword = false;
 let query = "";
 let activeView: View = "contacts";
 let settingsOpen = false;
+let appVersion = "";
 let callAction: "transfer" | "second" | null = null;
 let callActionQuery = "";
 let hasSecondCall = false;
@@ -1037,6 +1038,7 @@ function renderSettingsModal(): string {
         : lastCardDavSyncAt
           ? `Zuletzt erfolgreich synchronisiert: ${new Date(lastCardDavSyncAt).toLocaleString("de-DE")} · ${lastCardDavSyncCount} Kontakte mit Telefonnummer`
           : "CardDAV wurde noch nicht erfolgreich synchronisiert."}</p>
+      ${appVersion ? `<p class="app-version">NIVAKO Softphone · Version ${escapeHtml(appVersion)}</p>` : ""}
     </div>
   </section></div>`;
 }
@@ -1395,6 +1397,8 @@ function bindEvents(): void {
 async function boot(): Promise<void> {
   if (isTauriRuntime()) {
     try {
+      const appApi = await import("@tauri-apps/api/app");
+      appVersion = await appApi.getVersion();
       const api = await import("@tauri-apps/api/core");
       settings = { ...settings, launchAtStartup: await api.invoke<boolean>("get_autostart") };
       await api.invoke("set_close_to_tray", { enabled: settings.closeToTray });
