@@ -200,10 +200,8 @@ jobs:
           if ($msi) {
             $msiExtract = "$env:GITHUB_WORKSPACE\artifacts\msi-installed-tree"
             New-Item -ItemType Directory -Force -Path $msiExtract | Out-Null
-            $process = Start-Process msiexec.exe -ArgumentList @('/a', $msi.FullName, '/qn', "TARGETDIR=$msiExtract") -Wait -PassThru
-            if ($process.ExitCode -ne 0) {
-              throw "MSI administrative extraction failed with exit code $($process.ExitCode)"
-            }
+            & 7z x $msi.FullName "-o$msiExtract" -y | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "MSI extraction with 7-Zip failed with exit code $LASTEXITCODE" }
             $installedExe = Get-ChildItem -Path $msiExtract -Recurse -Filter "nivako-softphone.exe" | Select-Object -First 1
             if (-not $installedExe) {
               throw "MSI does not install nivako-softphone.exe"
