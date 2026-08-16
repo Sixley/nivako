@@ -48,10 +48,19 @@ TEL;TYPE=HOME,CELL,PREF:+491701234
 TEL;TYPE=FAX:+495021999
 END:VCARD`);
     expect(contact.phones.map(({ label, primary }) => [label, Boolean(primary)])).toEqual([
-      ["work", false], ["homeMobile", true], ["fax", false]
+      ["homeMobile", true], ["work", false], ["fax", false]
     ]);
     const roundTrip = parseVCard(serializeVCard(contact));
-    expect(roundTrip.phones.map((phone) => phone.label)).toEqual(["work", "homeMobile", "fax"]);
+    expect(roundTrip.phones.map((phone) => phone.label)).toEqual(["homeMobile", "work", "fax"]);
+  });
+
+  it("removes the URI prefix from vCard 4 phone numbers", () => {
+    const contact = parseVCard(`BEGIN:VCARD
+VERSION:4.0
+FN:URI Kontakt
+TEL;TYPE=CELL;VALUE=uri:tel:+49170123
+END:VCARD`);
+    expect(contact.phones[0].raw).toBe("+49170123");
   });
 });
 

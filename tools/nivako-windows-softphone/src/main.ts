@@ -15,7 +15,6 @@ const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
 const appVersion = "0.3.1";
-const appBuild = import.meta.env.VITE_BUILD_NUMBER || import.meta.env.VITE_COMMIT_SHA?.slice(0, 8) || "lokal";
 const cardDavRefreshMs = 15 * 60 * 1000;
 const sipReconnectMs = 60 * 1000;
 const sipStatusPollMs = 2000;
@@ -96,6 +95,7 @@ let callAction: "transfer" | "second" | null = null;
 let callActionQuery = "";
 let hasSecondCall = false;
 let contactMenu: { contactId: string; x: number; y: number } | null = null;
+let phonePicker: { contactId: string; callImmediately: boolean } | null = null;
 let editingContactId: string | null = null;
 let editingContactDraft: Contact | null = null;
 let cardDavTimer: number | undefined;
@@ -352,6 +352,19 @@ function setActiveNumber(number: string, contact?: Contact): void {
   render();
 }
 
+function selectContactNumber(contact: Contact, callImmediately = false): void {
+  if (contact.phones.length > 1) {
+    contactMenu = null;
+    phonePicker = { contactId: contact.id, callImmediately };
+    render();
+    return;
+  }
+  const phone = contact.phones[0];
+  if (!phone) return;
+  setActiveNumber(phone.normalized || phone.raw, contact);
+  if (callImmediately) void dial();
+}
+
 function selectedContact(): Contact | undefined {
   if (editingContactDraft) return editingContactDraft;
   const id = editingContactId || contactMenu?.contactId;
@@ -360,6 +373,7 @@ function selectedContact(): Contact | undefined {
 
 function closeContactOverlays(): void {
   contactMenu = null;
+  phonePicker = null;
   editingContactId = null;
   editingContactDraft = null;
 }
@@ -653,6 +667,18 @@ function renderContactMenu(): string {
     <button role="menuitem" data-contact-action="edit">Kontakt bearbeiten</button>
     <button class="context-danger" role="menuitem" data-contact-action="delete">Kontakt löschen</button>
   </div>`;
+}
+
+function renderPhonePicker(): string {
+  if (!phonePicker) return "";
+  const contact = contacts.find((candidate) => candidate.id === phonePicker?.contactId);
+  if (!contact) return "";
+  return `<div class="settings-modal-backdrop phone-picker-backdrop"><section class="phone-picker" role="dialog" aria-modal="true" aria-labelledby="phone-picker-title">
+    <header><div><h1 id="phone-picker-title">Nummer auswählen</h1><p>${escapeHtml(contact.displayName)}</p></div><button class="modal-close" id="close-phone-picker" aria-label="Schließen">×</button></header>
+    <div class="phone-picker-list">${contact.phones.map((phone) => `<button type="button" data-picked-phone="${escapeHtml(phone.normalized || phone.raw)}">
+      <span><strong>${escapeHtml(phoneLabelNames[phone.label])}</strong>${phone.primary ? "<small>Bevorzugt</small>" : ""}</span><b>${escapeHtml(phone.raw)}</b>
+    </button>`).join("")}</div>
+  </section></div>`;
 }
 
 function renderContactEditor(): string {
@@ -1026,7 +1052,7 @@ function render(): void {
       <aside class="sidebar">
         <div class="brand">
           <img class="brand-logo" src="${brandLogoUrl}" alt="NIVAKO Softphone – VoIP Client" />
-          <small>v${appVersion} · Build ${escapeHtml(appBuild)} · ${state.registered ? `${escapeHtml(settings.sipExtension)} registriert` : "SIP nicht registriert"}</small>
+          <small>v${appVersion} · ${state.registered ? `${escapeHtml(settings.sipExtension)} registriert` : "SIP nicht registriert"}</small>
         </div>
         <nav class="nav">
           ${navButton("contacts", "Kontakte")}
@@ -1072,7 +1098,7 @@ function render(): void {
         </div>
 
         <div class="history">
-          <h2>Letzte Aktionen <small>lokal gespeichert</small></h2>
+          <h2>Verlauf</h2>
           ${callHistory.slice(0, 5).map((entry) => `
             <button class="history-row" data-number="${escapeHtml(entry.number)}">
               <span class="history-icon">${entry.direction === "missed" ? "!" : entry.direction === "inbound" ? "↓" : "↑"}</span>
@@ -1090,6 +1116,7 @@ function render(): void {
       ${settingsOpen ? renderSettingsModal() : ""}
       ${renderCallActionModal()}
       ${renderContactMenu()}
+      ${renderPhonePicker()}
       ${renderContactEditor()}
     </section>
   `;
@@ -1147,9 +1174,7 @@ function bindEvents(): void {
     if (!contact) return;
     const action = button.dataset.contactAction;
     if (action === "call") {
-      contactMenu = null;
-      setActiveNumber(contact.phones[0]?.normalized || contact.phones[0]?.raw || "", contact);
-      void dial();
+      selectContactNumber(contact, true);
     }
     if (action === "copy-phone") void copyContactValue(contact.phones[0]?.raw || "", "Telefonnummer");
     if (action === "copy-email") void copyContactValue(contact.email || "", "E-Mail-Adresse");
@@ -1235,9 +1260,20 @@ function bindEvents(): void {
   document.querySelectorAll<HTMLButtonElement>("[data-number]").forEach((button) => {
     button.addEventListener("click", () => {
       const contact = contacts.find((candidate) => candidate.id === button.dataset.contact);
-      setActiveNumber(button.dataset.number || "", contact);
+      if (contact && button.classList.contains("contact-select")) selectContactNumber(contact);
+      else setActiveNumber(button.dataset.number || "", contact);
     });
   });
+
+  document.querySelector<HTMLButtonElement>("#close-phone-picker")?.addEventListener("click", () => { phonePicker = null; render(); });
+  document.querySelectorAll<HTMLButtonElement>("[data-picked-phone]").forEach((button) => button.addEventListener("click", () => {
+    const picker = phonePicker;
+    const contact = contacts.find((candidate) => candidate.id === picker?.contactId);
+    if (!picker || !contact) return;
+    phonePicker = null;
+    setActiveNumber(button.dataset.pickedPhone || "", contact);
+    if (picker.callImmediately) void dial();
+  }));
 
   document.querySelectorAll<HTMLButtonElement>("[data-favorite]").forEach((button) => {
     button.addEventListener("click", () => toggleFavorite(button.dataset.favorite || ""));

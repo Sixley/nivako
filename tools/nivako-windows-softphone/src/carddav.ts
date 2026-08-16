@@ -101,10 +101,11 @@ export function parseVCard(vcard: string, href: string = crypto.randomUUID(), et
       }
     }
     if (property === "TEL") {
+      const phoneValue = value.replace(/^tel:/i, "");
       phones.push({
         label: phoneLabelFromLine(line),
-        raw: value,
-        normalized: normalizePhoneNumber(value),
+        raw: phoneValue,
+        normalized: normalizePhoneNumber(phoneValue),
         primary: /(?:TYPE=|[,;])PREF(?:[,;:]|$)/i.test(line)
       });
     }
@@ -118,7 +119,7 @@ export function parseVCard(vcard: string, href: string = crypto.randomUUID(), et
     organization: organization || undefined,
     email: email || undefined,
     photoUrl: photoUrl || undefined,
-    phones,
+    phones: phones.sort((left, right) => Number(Boolean(right.primary)) - Number(Boolean(left.primary))),
     source: "carddav",
     etag
   };

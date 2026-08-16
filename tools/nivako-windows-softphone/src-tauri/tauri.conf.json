@@ -14,10 +14,10 @@
     "windows": [
       {
         "title": "NIVAKO Softphone",
-        "width": 1280,
-        "height": 820,
-        "minWidth": 1080,
-        "minHeight": 720
+        "width": 1360,
+        "height": 900,
+        "minWidth": 1180,
+        "minHeight": 760
       }
     ],
     "security": {
