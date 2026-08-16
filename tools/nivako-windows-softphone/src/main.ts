@@ -14,7 +14,6 @@ import type { CallEntry, Contact, ContactPhone, NativeSipSnapshot, PhoneLabel, S
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.3.1";
 const cardDavRefreshMs = 15 * 60 * 1000;
 const sipReconnectMs = 60 * 1000;
 const sipStatusPollMs = 2000;
@@ -963,7 +962,7 @@ function renderMainPanel(visibleContacts: Contact[]): string {
       <div class="panel-header">
         <div>
           <h1>Telefonbuch</h1>
-          <p>${contacts.length} lokale Kontakte ${syncState === "ok" ? "· CardDAV synchronisiert" : ""}</p>
+          <p>${contacts.length} Kontakte</p>
         </div>
         <button class="sync-button" id="new-contact">+ Kontakt</button>
       </div>
@@ -980,7 +979,7 @@ function navButton(view: View, label: string): string {
 }
 
 function telephonyStatusText(): string {
-  if (state.registered) return "SIP registriert";
+  if (state.registered) return settings.sipDisplayName ? `${settings.sipDisplayName} ist online` : "Benutzer online";
   if (settings.safeCallMode) return "Anrufschutz aktiv";
   if (settings.enableWebRtcSip) return "SIP-WebRTC bereit";
   if (canUseNativeTelephony()) return "Telefonie noch nicht verbunden";
@@ -1049,26 +1048,26 @@ function render(): void {
 
   root.innerHTML = `
     <section class="shell">
-      <aside class="sidebar">
+      <header class="topbar">
         <div class="brand">
           <img class="brand-logo" src="${brandLogoUrl}" alt="NIVAKO Softphone – VoIP Client" />
-          <small>v${appVersion} · ${state.registered ? `${escapeHtml(settings.sipExtension)} registriert` : "SIP nicht registriert"}</small>
         </div>
         <nav class="nav">
           ${navButton("contacts", "Kontakte")}
           ${navButton("history", "Verlauf")}
           ${navButton("favorites", "Favoriten")}
         </nav>
-      </aside>
+        <div class="topbar-actions">
+          <span class="user-presence ${state.registered ? "online" : "offline"}"><i></i>${state.registered ? "Online" : "Offline"}</span>
+          <button class="dnd-trigger ${settings.doNotDisturb ? "active" : ""}" id="toggle-dnd" title="Nicht stören" aria-pressed="${settings.doNotDisturb}">Nicht stören</button>
+          <button class="settings-trigger" id="open-settings" title="Einstellungen" aria-label="Einstellungen">⚙</button>
+        </div>
+      </header>
 
       ${renderMainPanel(visibleContacts)}
 
       <section class="phone-panel">
-        <div class="phone-quick-actions">
-          <button class="dnd-trigger ${settings.doNotDisturb ? "active" : ""}" id="toggle-dnd" title="Nicht stören" aria-pressed="${settings.doNotDisturb}">Nicht stören</button>
-          <button class="settings-trigger" id="open-settings" title="Einstellungen" aria-label="Einstellungen">⚙</button>
-        </div>
-        <div class="call-card">
+        <div class="call-card ${state.callState !== "idle" ? "in-call" : "idle-call"}">
           <div class="status-line">
             <span class="status-dot ${state.registered ? "" : "offline"}"></span>
             <span>${telephonyStatusText()}</span>
@@ -1082,7 +1081,7 @@ function render(): void {
             ${keypad.map((digit) => `<button data-digit="${digit}">${digit}</button>`).join("")}
           </div>
           <div class="call-actions">
-            <button class="secondary" id="register-sip" ${settings.enableWebRtcSip || canUseNativeTelephony() ? "" : "disabled"}>Registrieren</button>
+            ${state.registered ? "" : `<button class="secondary" id="register-sip" ${settings.enableWebRtcSip || canUseNativeTelephony() ? "" : "disabled"}>Verbinden</button>`}
             <button class="primary" id="dial" ${!state.activeNumber && state.callState !== "ringing" ? "disabled" : ""}>${state.callState === "ringing" ? "Annehmen" : settings.safeCallMode ? "Lokal erfassen" : "Anrufen"}</button>
             <button class="danger" id="hangup" ${state.callState === "idle" ? "disabled" : ""}>${state.callState === "ringing" ? "Ablehnen" : "Auflegen"}</button>
           </div>
@@ -1097,19 +1096,6 @@ function render(): void {
           </div>
         </div>
 
-        <div class="history">
-          <h2>Verlauf</h2>
-          ${callHistory.slice(0, 5).map((entry) => `
-            <button class="history-row" data-number="${escapeHtml(entry.number)}">
-              <span class="history-icon">${entry.direction === "missed" ? "!" : entry.direction === "inbound" ? "↓" : "↑"}</span>
-              <span class="history-main">
-                <strong>${escapeHtml(entry.name)}</strong>
-                <small>${escapeHtml(entry.number)}</small>
-              </span>
-              <small class="history-meta">${escapeHtml(callResultText(entry.result))}${entry.durationSeconds !== undefined ? ` · ${formatDuration(entry.durationSeconds)}` : ""} · ${escapeHtml(entry.time)}</small>
-            </button>
-          `).join("") || '<div class="empty">Noch keine Aktionen</div>'}
-        </div>
       </section>
       ${showToast ? `<div class="toast ${notificationTone(notice)}" role="status"><strong>${escapeHtml(notice)}</strong></div>` : ""}
       ${state.callState === "ringing" ? `<div class="in-app-call-backdrop"><section class="in-app-call" role="dialog" aria-modal="true"><div class="incoming-avatar">${state.activeContact?.photoUrl ? `<img src="${escapeHtml(state.activeContact.photoUrl)}" alt="" />` : escapeHtml(incomingInitials)}</div><div class="incoming-copy"><span>Eingehender Anruf</span><strong>${escapeHtml(incomingName)}</strong><small>${escapeHtml(state.activeNumber || state.remoteIdentity || "")}</small></div><div class="incoming-actions"><button class="danger" id="overlay-reject">Ablehnen</button><button class="primary" id="overlay-accept">Annehmen</button></div></section></div>` : ""}
