@@ -2351,7 +2351,14 @@ fn sip_accept() -> Result<NativeSipStatus, AppError> {
     }
 
     with_session(|session| {
-        let call = unsafe { linphone_core_get_current_call(session.core) };
+        // Bei mehreren Leitungen kann liblinphone als "current call" kurzfristig
+        // den gehaltenen Anruf melden. Die UI-Aktionen beziehen sich dagegen auf
+        // den von unserer Sitzung geführten aktiven Anruf.
+        let call = if !session.active_call.is_null() {
+            session.active_call
+        } else {
+            unsafe { linphone_core_get_current_call(session.core) }
+        };
         if call.is_null() {
             return Err(AppError::Message(
                 "Kein eingehender Anruf zum Annehmen".to_string(),

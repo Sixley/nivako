@@ -90,7 +90,7 @@ let hasStoredSipPassword = false;
 let query = "";
 let activeView: View = "contacts";
 let settingsOpen = false;
-let appVersion = "";
+let appVersion = "0.4.4";
 let callAction: "transfer" | "second" | null = null;
 let callActionQuery = "";
 let hasSecondCall = false;
@@ -996,7 +996,7 @@ function renderSettingsModal(): string {
   const inputOptions = audioDevices.inputs.map((device, index) => `<option value="${escapeHtml(device.deviceId)}" ${settings.selectedMicrophoneId === device.deviceId ? "selected" : ""}>${escapeHtml(device.label || `Mikrofon ${index + 1}`)}</option>`).join("");
   const outputOptions = audioDevices.outputs.map((device, index) => `<option value="${escapeHtml(device.deviceId)}" ${settings.selectedSpeakerId === device.deviceId ? "selected" : ""}>${escapeHtml(device.label || `Lautsprecher ${index + 1}`)}</option>`).join("");
   return `<div class="settings-modal-backdrop"><section class="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-    <header><div><h1 id="settings-title">Einstellungen</h1><p>Telefonie, Kontakte und Audio</p></div><button class="modal-close" id="close-settings" aria-label="Schließen">×</button></header>
+    <header><div><h1 id="settings-title">Einstellungen</h1><p>Telefonie, Kontakte und Audio</p></div><div class="settings-header-meta"><span>Version: ${escapeHtml(appVersion)}</span><button class="modal-close" id="close-settings" aria-label="Schließen">×</button></div></header>
     <div class="settings-modal-content">
       <h2>Audio</h2>
       <form class="settings-list compact-settings" id="audio-form">
@@ -1038,7 +1038,6 @@ function renderSettingsModal(): string {
         : lastCardDavSyncAt
           ? `Zuletzt erfolgreich synchronisiert: ${new Date(lastCardDavSyncAt).toLocaleString("de-DE")} · ${lastCardDavSyncCount} Kontakte mit Telefonnummer`
           : "CardDAV wurde noch nicht erfolgreich synchronisiert."}</p>
-      ${appVersion ? `<p class="app-version">NIVAKO Softphone · Version ${escapeHtml(appVersion)}</p>` : ""}
     </div>
   </section></div>`;
 }
