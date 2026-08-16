@@ -27,6 +27,8 @@ export interface CallEntry {
   time: string;
   result?: "blocked" | "started" | "failed" | "completed";
   durationSeconds?: number;
+  callbackRequested?: boolean;
+  note?: string;
 }
 
 export interface SoftphoneState {
@@ -74,4 +76,6 @@ export interface NativeSipSnapshot {
   remote_number: string;
   remote_display_name: string;
   has_second_call: boolean;
+  waiting_number: string;
+  waiting_display_name: string;
 }

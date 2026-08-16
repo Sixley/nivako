@@ -36,6 +36,8 @@ struct NativeSipSnapshot {
     remote_number: String,
     remote_display_name: String,
     has_second_call: bool,
+    waiting_number: String,
+    waiting_display_name: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -242,6 +244,7 @@ extern "C" {
         call: *mut LinphoneCall,
         refer_to: *const LinphoneAddress,
     ) -> c_int;
+    fn linphone_call_transfer_to_another(call: *mut LinphoneCall, dest: *mut LinphoneCall) -> c_int;
     fn linphone_core_enable_mic(core: *mut LinphoneCore, enable: bool_t);
     fn linphone_call_send_dtmf(call: *mut LinphoneCall, dtmf: c_char) -> c_int;
     fn ms_factory_set_plugins_dir(factory: *mut MSFactory, path: *const c_char);
@@ -286,6 +289,8 @@ static SIP_SNAPSHOT: Lazy<Arc<Mutex<NativeSipSnapshot>>> = Lazy::new(|| {
         remote_number: String::new(),
         remote_display_name: String::new(),
         has_second_call: false,
+        waiting_number: String::new(),
+        waiting_display_name: String::new(),
     }))
 });
 static SIP_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
@@ -317,6 +322,7 @@ enum SipSidecarCommand {
     Hold,
     SwitchCall,
     Conference,
+    AttendedTransfer,
     Mute {
         muted: bool,
     },
@@ -1176,7 +1182,7 @@ fn session_snapshot(session: &LinphoneSession, message: String) -> NativeSipSnap
     let call_event = last_call_event()
         .map(|event| format!(" {event}."))
         .unwrap_or_default();
-    let call = unsafe { linphone_core_get_current_call(session.core) };
+    let call = if !session.active_call.is_null() { session.active_call } else { unsafe { linphone_core_get_current_call(session.core) } };
     let (remote_number, remote_display_name) = if call.is_null() {
         (String::new(), String::new())
     } else {
@@ -1188,6 +1194,14 @@ fn session_snapshot(session: &LinphoneSession, message: String) -> NativeSipSnap
                 c_string_or_empty(unsafe { linphone_address_get_username(address) }),
                 c_string_or_empty(unsafe { linphone_address_get_display_name(address) }),
             )
+        }
+    };
+    let (waiting_number, waiting_display_name) = if session.waiting_call.is_null() {
+        (String::new(), String::new())
+    } else {
+        let address = unsafe { linphone_call_get_remote_address(session.waiting_call) };
+        if address.is_null() { (String::new(), String::new()) } else {
+            (c_string_or_empty(unsafe { linphone_address_get_username(address) }), c_string_or_empty(unsafe { linphone_address_get_display_name(address) }))
         }
     };
     NativeSipSnapshot {
@@ -1207,6 +1221,8 @@ fn session_snapshot(session: &LinphoneSession, message: String) -> NativeSipSnap
         remote_number,
         remote_display_name,
         has_second_call: !session.waiting_call.is_null(),
+        waiting_number,
+        waiting_display_name,
     }
 }
 
@@ -1867,6 +1883,10 @@ fn sidecar_reply(command: SipSidecarCommand) -> SipSidecarReply {
             Ok(status) => SipSidecarReply::Status { status },
             Err(error) => SipSidecarReply::Error { message: error.to_string() },
         },
+        SipSidecarCommand::AttendedTransfer => match sip_attended_transfer() {
+            Ok(status) => SipSidecarReply::Status { status },
+            Err(error) => SipSidecarReply::Error { message: error.to_string() },
+        },
         SipSidecarCommand::Mute { muted } => match sip_mute(muted) {
             Ok(status) => SipSidecarReply::Status { status },
             Err(error) => SipSidecarReply::Error {
@@ -2078,6 +2098,8 @@ fn sip_register(
                     remote_number: String::new(),
                     remote_display_name: String::new(),
                     has_second_call: false,
+                    waiting_number: String::new(),
+                    waiting_display_name: String::new(),
                 });
                 Ok(status)
             }
@@ -2104,6 +2126,8 @@ fn sip_register(
                     remote_number: String::new(),
                     remote_display_name: String::new(),
                     has_second_call: false,
+                    waiting_number: String::new(),
+                    waiting_display_name: String::new(),
                 });
                 Ok(NativeSipStatus {
                     registered: false,
@@ -2137,6 +2161,8 @@ fn sip_register(
                     remote_number: String::new(),
                     remote_display_name: String::new(),
                     has_second_call: false,
+                    waiting_number: String::new(),
+                    waiting_display_name: String::new(),
                 });
                 Ok(NativeSipStatus {
                     registered: false,
@@ -2181,6 +2207,8 @@ fn sip_register(
                     remote_number: String::new(),
                     remote_display_name: String::new(),
                     has_second_call: false,
+                    waiting_number: String::new(),
+                    waiting_display_name: String::new(),
                 });
                 Ok(NativeSipStatus {
                     registered: false,
@@ -2211,6 +2239,8 @@ fn sip_register(
         remote_number: String::new(),
         remote_display_name: String::new(),
         has_second_call: false,
+        waiting_number: String::new(),
+        waiting_display_name: String::new(),
     });
     Ok(NativeSipStatus {
         registered: false,
@@ -2681,6 +2711,30 @@ fn sip_transfer(target: String) -> Result<NativeSipStatus, AppError> {
 }
 
 #[tauri::command]
+fn sip_attended_transfer() -> Result<NativeSipStatus, AppError> {
+    if !is_sip_sidecar_process() {
+        return match sip_sidecar_call(SipSidecarCommand::AttendedTransfer)? {
+            SipSidecarReply::Status { status } => Ok(status),
+            SipSidecarReply::Error { message } => Err(AppError::Message(message)),
+            SipSidecarReply::Snapshot { snapshot } => Ok(NativeSipStatus { registered: snapshot.registered, message: snapshot.message }),
+        };
+    }
+    with_session(|session| {
+        if session.active_call.is_null() || session.waiting_call.is_null() {
+            return Err(AppError::Message("Für die Rückfrage-Übergabe werden zwei Gespräche benötigt.".to_string()));
+        }
+        let status = unsafe { linphone_call_transfer_to_another(session.waiting_call, session.active_call) };
+        if status != 0 {
+            return Err(AppError::Message("Rückfrage-Übergabe wurde von liblinphone abgelehnt.".to_string()));
+        }
+        tick_core_for(session.core, 8, 80);
+        let snapshot = session_snapshot(session, "Rückfrage-Übergabe gestartet.".to_string());
+        set_sip_snapshot(snapshot.clone());
+        Ok(NativeSipStatus { registered: snapshot.registered, message: snapshot.message })
+    })
+}
+
+#[tauri::command]
 fn sip_mute(muted: bool) -> Result<NativeSipStatus, AppError> {
     if !is_sip_sidecar_process() {
         return match sip_sidecar_call(SipSidecarCommand::Mute { muted })? {
@@ -2894,6 +2948,7 @@ pub fn run() {
             sip_hold,
             sip_switch_call,
             sip_conference,
+            sip_attended_transfer,
             sip_set_audio_levels,
             sip_transfer,
             sip_mute,

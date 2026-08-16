@@ -92,10 +92,12 @@ let historyQuery = "";
 let historyFilter: "all" | CallEntry["direction"] = "all";
 let activeView: View = "contacts";
 let settingsOpen = false;
-let appVersion = "0.5.0";
+let appVersion = "0.6.0";
 let callAction: "transfer" | "second" | null = null;
 let callActionQuery = "";
 let hasSecondCall = false;
+let waitingCallNumber = "";
+let waitingCallName = "";
 let contactMenu: { contactId: string; x: number; y: number } | null = null;
 let phonePicker: { contactId: string; callImmediately: boolean } | null = null;
 let editingContactId: string | null = null;
@@ -247,6 +249,8 @@ function applyNativeSipSnapshot(snapshot: NativeSipSnapshot): void {
 
   sipNotice = nextNotice;
   hasSecondCall = snapshot.has_second_call;
+  waitingCallNumber = snapshot.waiting_number || "";
+  waitingCallName = snapshot.waiting_display_name || waitingCallNumber;
   state = nextState;
   if (settings.doNotDisturb && nextState.callState === "ringing" && !dndRejecting && telephony.reject) {
     dndRejecting = true;
@@ -643,6 +647,18 @@ async function startConference(): Promise<void> {
   render();
 }
 
+async function attendedTransfer(): Promise<void> {
+  if (!telephony.attendedTransfer) return;
+  try {
+    await telephony.attendedTransfer();
+    applyNativeSipSnapshot(await getSipStatusNative());
+    notice = "Rückfrage-Übergabe wurde gestartet.";
+  } catch (error) {
+    notice = errorMessage(error, "Rückfrage-Übergabe fehlgeschlagen");
+  }
+  render();
+}
+
 function renderCallActionModal(): string {
   if (!callAction) return "";
   const matches = searchContacts(contacts, callActionQuery).filter((contact) => contact.phones.length > 0).slice(0, 6);
@@ -738,6 +754,30 @@ async function testSpeaker(): Promise<void> {
   oscillator.addEventListener("ended", () => void context.close());
   notice = "Testton wird abgespielt.";
   render();
+}
+
+async function testMicrophone(): Promise<void> {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: settings.selectedMicrophoneId ? { deviceId: { exact: settings.selectedMicrophoneId } } : true });
+    const context = new AudioContext();
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 256;
+    context.createMediaStreamSource(stream).connect(analyser);
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    const until = Date.now() + 5000;
+    const update = () => {
+      analyser.getByteFrequencyData(data);
+      const level = Math.min(100, Math.round(data.reduce((sum, value) => sum + value, 0) / data.length * 1.6));
+      const bar = document.querySelector<HTMLElement>("#microphone-test-level");
+      if (bar) bar.style.width = `${level}%`;
+      if (Date.now() < until) requestAnimationFrame(update);
+      else { stream.getTracks().forEach((track) => track.stop()); void context.close(); }
+    };
+    update();
+  } catch (error) {
+    notice = errorMessage(error, "Mikrofontest konnte nicht gestartet werden");
+    render();
+  }
 }
 
 function handleKeyboardShortcut(event: KeyboardEvent): void {
@@ -903,14 +943,14 @@ function renderHistoryList(emptyText: string): string {
   return `
     <div class="contact-list">
       ${entries.map((entry) => `
-        <button class="history-row" data-number="${escapeHtml(entry.number)}">
+        <div class="history-entry"><button class="history-row" data-number="${escapeHtml(entry.number)}">
           <span class="history-icon">${entry.direction === "missed" ? "!" : entry.direction === "inbound" ? "↓" : "↑"}</span>
           <span class="history-main">
             <strong>${escapeHtml(entry.name)}</strong>
             <small>${escapeHtml(entry.number)}</small>
           </span>
           <small class="history-meta">${escapeHtml(callResultText(entry.result))}${entry.durationSeconds !== undefined ? ` · ${formatDuration(entry.durationSeconds)}` : ""} · ${escapeHtml(entry.time)}</small>
-        </button>
+        </button><button class="history-callback ${entry.callbackRequested ? "active" : ""}" data-callback-id="${escapeHtml(entry.id)}">${entry.callbackRequested ? "Rückruf erledigt" : "Rückruf markieren"}</button></div>
       `).join("")}
     </div>
   `;
@@ -1044,7 +1084,7 @@ function renderSettingsModal(): string {
         <label><span>Lautsprecher</span><select name="selectedSpeakerId"><option value="">Systemstandard</option>${outputOptions}</select></label>
         <label><span id="speaker-volume-label">Lautstärke (${settings.speakerVolume} %)</span><input name="speakerVolume" type="range" min="0" max="100" value="${settings.speakerVolume}" /></label>
         <label><span id="microphone-volume-label">Mikrofonpegel (${settings.microphoneVolume} %)</span><input name="microphoneVolume" type="range" min="0" max="100" value="${settings.microphoneVolume}" /></label>
-        <div class="modal-row"><button class="secondary" type="button" id="test-speaker">Testton</button><button class="secondary" type="button" id="refresh-audio">Geräte aktualisieren</button><button class="primary" type="submit">Audio speichern</button></div>
+        <div class="microphone-meter"><i id="microphone-test-level"></i></div><div class="modal-row"><button class="secondary" type="button" id="test-microphone">Mikrofon testen</button><button class="secondary" type="button" id="test-speaker">Testton</button><button class="secondary" type="button" id="refresh-audio">Geräte aktualisieren</button><button class="primary" type="submit">Audio speichern</button></div>
       </form>
       <h2>Konten</h2>
       <form class="settings-list compact-settings" id="settings-form">
@@ -1078,6 +1118,9 @@ function renderSettingsModal(): string {
         : lastCardDavSyncAt
           ? `Zuletzt erfolgreich synchronisiert: ${new Date(lastCardDavSyncAt).toLocaleString("de-DE")} · ${lastCardDavSyncCount} Kontakte mit Telefonnummer`
           : "CardDAV wurde noch nicht erfolgreich synchronisiert."}</p>
+      <details class="diagnostics"><summary>Diagnose</summary>
+        <dl><div><dt>Telefonie</dt><dd>${escapeHtml(state.registered ? "Verbunden" : "Getrennt")}</dd></div><div><dt>Letzter SIP-Status</dt><dd>${escapeHtml(sipNotice)}</dd></div><div><dt>CardDAV</dt><dd>${escapeHtml(syncState === "error" ? "Fehler beim letzten Abgleich" : syncState === "syncing" ? "Abgleich läuft" : lastCardDavSyncAt ? `Zuletzt erfolgreich ${new Date(lastCardDavSyncAt).toLocaleString("de-DE")}` : "Noch kein erfolgreicher Abgleich")}</dd></div></dl>
+      </details>
     </div>
   </section></div>`;
 }
@@ -1139,9 +1182,11 @@ function render(): void {
               <button class="secondary" id="transfer" ${state.callState === "active" || state.callState === "held" ? "" : "disabled"}>Weiterleiten</button>
               <button class="secondary" id="second-call" ${state.callState === "active" ? "" : "disabled"}>Weiteres Gespräch</button>
               ${hasSecondCall ? '<button class="secondary active" id="switch-call">Gespräch wechseln</button>' : ""}
+              ${hasSecondCall ? '<button class="secondary active" id="attended-transfer">Nach Rückfrage übergeben</button>' : ""}
               ${hasSecondCall ? '<button class="secondary active conference-action" id="conference">Konferenz starten</button>' : ""}
             `}
           </div>
+          ${hasSecondCall ? `<div class="line-overview"><div class="line-card active"><small>Aktives Gespräch</small><strong>${escapeHtml(state.activeContact?.displayName || state.remoteIdentity || state.activeNumber)}</strong><span>${escapeHtml(state.activeNumber)}</span></div><div class="line-card held"><small>Gehaltenes Gespräch</small><strong>${escapeHtml(waitingCallName || "Zweite Leitung")}</strong><span>${escapeHtml(waitingCallNumber)}</span></div></div>` : ""}
         </div>
 
       </section>
@@ -1337,6 +1382,7 @@ function bindEvents(): void {
   document.querySelector<HTMLButtonElement>("#second-call")?.addEventListener("click", () => { callAction = "second"; callActionQuery = ""; render(); });
   document.querySelector<HTMLButtonElement>("#switch-call")?.addEventListener("click", () => void switchCall());
   document.querySelector<HTMLButtonElement>("#conference")?.addEventListener("click", () => void startConference());
+  document.querySelector<HTMLButtonElement>("#attended-transfer")?.addEventListener("click", () => void attendedTransfer());
   const closeCallAction = () => { callAction = null; callActionQuery = ""; render(); };
   document.querySelector<HTMLButtonElement>("#close-call-action")?.addEventListener("click", closeCallAction);
   document.querySelector<HTMLButtonElement>("#cancel-call-action")?.addEventListener("click", closeCallAction);
@@ -1362,11 +1408,17 @@ function bindEvents(): void {
   document.querySelector<HTMLButtonElement>("#sync-carddav")?.addEventListener("click", () => void syncCardDav());
   document.querySelector<HTMLButtonElement>("#refresh-audio")?.addEventListener("click", () => void refreshAudioDevices(true));
   document.querySelector<HTMLButtonElement>("#test-speaker")?.addEventListener("click", () => void testSpeaker());
+  document.querySelector<HTMLButtonElement>("#test-microphone")?.addEventListener("click", () => void testMicrophone());
   document.querySelector<HTMLButtonElement>("#clear-history")?.addEventListener("click", () => {
     callHistory = [];
     saveHistory(callHistory);
     render();
   });
+  document.querySelectorAll<HTMLButtonElement>("[data-callback-id]").forEach((button) => button.addEventListener("click", () => {
+    callHistory = callHistory.map((entry) => entry.id === button.dataset.callbackId ? { ...entry, callbackRequested: !entry.callbackRequested } : entry);
+    saveHistory(callHistory);
+    render();
+  }));
   document.querySelector<HTMLInputElement>("#vcard-import")?.addEventListener("change", (event) => {
     const file = (event.target as HTMLInputElement).files?.[0];
     if (file) void importVCards(file);
