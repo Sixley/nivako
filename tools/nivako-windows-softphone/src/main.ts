@@ -833,6 +833,7 @@ function renderContact(contact: Contact): string {
   const initials = contact.displayName.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase();
   const details = [contact.organization, contact.email].filter(Boolean).join(" · ") || contact.source || "Kontakt";
   const extraCount = Math.max(0, contact.phones.length - 1);
+  const primaryLabel = primaryPhone ? phoneLabelNames[primaryPhone.label] : "";
 
   return `
     <div class="contact-row">
@@ -845,10 +846,9 @@ function renderContact(contact: Contact): string {
           </span>
           <span class="contact-number">
             <span>${escapeHtml(primaryPhone?.raw || "Keine Nummer")}</span>
-            ${extraCount ? `<small>+${extraCount}</small>` : ""}
+            <small>${escapeHtml(primaryLabel)}${extraCount ? ` · ${extraCount} weitere` : ""}</small>
           </span>
         </button>
-        ${contact.phones.length > 1 ? `<div class="phone-chips">${contact.phones.slice(1).map((phone) => `<button class="phone-chip" data-number="${escapeHtml(phone.normalized)}" data-contact="${escapeHtml(contact.id)}">${escapeHtml(phoneLabelNames[phone.label])} ${escapeHtml(phone.raw)}</button>`).join("")}</div>` : ""}
       </div>
       <button class="favorite-button ${contact.favorite ? "active" : ""}" title="Favorit umschalten" data-favorite="${escapeHtml(contact.id)}">${contact.favorite ? "★" : "☆"}</button>
     </div>
@@ -1058,7 +1058,7 @@ function render(): void {
           ${navButton("favorites", "Favoriten")}
         </nav>
         <div class="topbar-actions">
-          <span class="user-presence ${state.registered ? "online" : "offline"}"><i></i>${state.registered ? "Online" : "Offline"}</span>
+          <span class="user-presence ${state.registered ? "online" : "offline"}"><i></i>${escapeHtml(settings.sipExtension)} · ${state.registered ? "Online" : "Offline"}</span>
           <button class="dnd-trigger ${settings.doNotDisturb ? "active" : ""}" id="toggle-dnd" title="Nicht stören" aria-pressed="${settings.doNotDisturb}">Nicht stören</button>
           <button class="settings-trigger" id="open-settings" title="Einstellungen" aria-label="Einstellungen">⚙</button>
         </div>
@@ -1068,10 +1068,7 @@ function render(): void {
 
       <section class="phone-panel">
         <div class="call-card ${state.callState !== "idle" ? "in-call" : "idle-call"}">
-          <div class="status-line">
-            <span class="status-dot ${state.registered ? "" : "offline"}"></span>
-            <span>${telephonyStatusText()}</span>
-          </div>
+          ${state.registered ? "" : `<div class="connection-alert"><strong>${escapeHtml(telephonyStatusText())}</strong><span>Telefonie verbinden, um Anrufe zu starten.</span></div>`}
           <div class="callee">
             <strong>${escapeHtml(state.activeContact?.displayName || state.remoteIdentity || state.activeNumber || "Nummer wählen")}</strong>
             <small>${escapeHtml(state.activeContact?.organization || state.activeNumber || "Nummer eingeben oder Kontakt auswählen")}</small>
@@ -1083,16 +1080,17 @@ function render(): void {
           <div class="call-actions">
             ${state.registered ? "" : `<button class="secondary" id="register-sip" ${settings.enableWebRtcSip || canUseNativeTelephony() ? "" : "disabled"}>Verbinden</button>`}
             <button class="primary" id="dial" ${!state.activeNumber && state.callState !== "ringing" ? "disabled" : ""}>${state.callState === "ringing" ? "Annehmen" : settings.safeCallMode ? "Lokal erfassen" : "Anrufen"}</button>
-            <button class="danger" id="hangup" ${state.callState === "idle" ? "disabled" : ""}>${state.callState === "ringing" ? "Ablehnen" : "Auflegen"}</button>
+            ${state.callState === "idle" ? "" : `<button class="danger" id="hangup">${state.callState === "ringing" ? "Ablehnen" : "Auflegen"}</button>`}
           </div>
           <div class="call-actions compact-actions">
-            <button class="secondary" id="backspace" ${!state.activeNumber ? "disabled" : ""}>Rueck</button>
-            <button class="secondary" id="hold" ${state.callState === "idle" ? "disabled" : ""}>${state.callState === "held" ? "Weiter" : "Halten"}</button>
-            <button class="secondary" id="mute" ${state.callState === "idle" ? "disabled" : ""}>${state.muted ? "Mikro an" : "Stumm"}</button>
-            <button class="secondary" id="transfer" ${state.callState === "active" || state.callState === "held" ? "" : "disabled"}>Weiterleiten</button>
-            <button class="secondary" id="second-call" ${state.callState === "active" ? "" : "disabled"}>Zweiter Anruf</button>
-            ${hasSecondCall ? '<button class="secondary active" id="switch-call">Gespräch wechseln</button>' : ""}
-            ${hasSecondCall ? '<button class="secondary active" id="conference">Konferenz</button>' : ""}
+            ${state.callState === "idle" ? `<button class="secondary backspace-action" id="backspace" ${!state.activeNumber ? "disabled" : ""}>⌫ Löschen</button>` : `
+              <button class="secondary" id="hold">${state.callState === "held" ? "Fortsetzen" : "Halten"}</button>
+              <button class="secondary" id="mute">${state.muted ? "Mikrofon an" : "Stumm"}</button>
+              <button class="secondary" id="transfer" ${state.callState === "active" || state.callState === "held" ? "" : "disabled"}>Weiterleiten</button>
+              <button class="secondary" id="second-call" ${state.callState === "active" ? "" : "disabled"}>Weiteres Gespräch</button>
+              ${hasSecondCall ? '<button class="secondary active" id="switch-call">Gespräch wechseln</button>' : ""}
+              ${hasSecondCall ? '<button class="secondary active conference-action" id="conference">Konferenz starten</button>' : ""}
+            `}
           </div>
         </div>
 

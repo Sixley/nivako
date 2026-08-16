@@ -199,7 +199,8 @@ jobs:
           if (-not $nsis) {
             throw "NSIS setup was not created"
           }
-          Copy-Item $nsis.FullName "artifacts\NIVAKO-Softphone-Setup-0.4.0.exe" -Force
+          $package = Get-Content "$env:SOFTPHONE_DIR\package.json" | ConvertFrom-Json
+          Copy-Item $nsis.FullName "artifacts\NIVAKO-Softphone-Setup-$($package.version).exe" -Force
 
       - name: Upload Windows artifacts
         if: always()
@@ -209,7 +210,7 @@ jobs:
           if-no-files-found: warn
           path: |
             artifacts/tauri-build.log
-            artifacts/NIVAKO-Softphone-Setup-0.4.0.exe
+            artifacts/NIVAKO-Softphone-Setup-*.exe
             artifacts/nivako-softphone-windows-portable.zip
             ${{ env.SOFTPHONE_DIR }}/src-tauri/target/release/bundle/**/*.exe
 
