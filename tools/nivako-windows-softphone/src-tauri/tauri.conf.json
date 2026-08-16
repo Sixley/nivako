@@ -27,7 +27,7 @@
   "bundle": {
     "active": true,
     "icon": ["icons/icon.ico"],
-    "targets": ["msi", "nsis"],
+    "targets": ["nsis"],
     "publisher": "NIVAKO",
     "category": "Business",
     "resources": {

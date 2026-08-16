@@ -193,35 +193,10 @@ jobs:
           $ErrorActionPreference = "Stop"
           $bundle = "$env:SOFTPHONE_DIR\src-tauri\target\release\bundle"
           $nsis = Get-ChildItem -Path $bundle -Recurse -Filter "*-setup.exe" | Select-Object -First 1
-          $msi = Get-ChildItem -Path $bundle -Recurse -Filter "*.msi" | Select-Object -First 1
-          if (-not $nsis -and -not $msi) {
-            throw "Neither an NSIS setup nor an MSI package was created"
+          if (-not $nsis) {
+            throw "NSIS setup was not created"
           }
-          if ($msi) {
-            $msiExtract = "$env:GITHUB_WORKSPACE\artifacts\msi-installed-tree"
-            New-Item -ItemType Directory -Force -Path $msiExtract | Out-Null
-            & 7z x $msi.FullName "-o$msiExtract" -y | Out-Host
-            if ($LASTEXITCODE -ne 0) { throw "MSI extraction with 7-Zip failed with exit code $LASTEXITCODE" }
-            $installedExe = Get-ChildItem -Path $msiExtract -Recurse -Filter "nivako-softphone.exe" | Select-Object -First 1
-            if (-not $installedExe) {
-              throw "MSI does not install nivako-softphone.exe"
-            }
-            $installedRoot = Split-Path $installedExe.FullName -Parent
-            $requiredRuntime = @(
-              "$installedRoot\liblinphone.dll",
-              "$installedRoot\lib\mediastreamer\plugins\libmswasapi.dll",
-              "$installedRoot\share\belr\grammars\vcard_grammar.belr"
-            )
-            $missingRuntime = $requiredRuntime | Where-Object { -not (Test-Path $_) }
-            if ($missingRuntime) {
-              $missingRuntime | ForEach-Object { Write-Host "Missing from MSI install tree: $_" }
-              Get-ChildItem -Path $installedRoot -Recurse | Select-Object FullName
-              throw "MSI install tree is incomplete; refusing to publish a broken MSI"
-            }
-            Write-Host "MSI extraction contains the executable and complete Linphone runtime tree"
-          }
-          if ($nsis) { Copy-Item $nsis.FullName "artifacts\NIVAKO-Softphone-Setup-0.3.0.exe" -Force }
-          if ($msi) { Copy-Item $msi.FullName "artifacts\NIVAKO-Softphone-0.3.0.msi" -Force }
+          Copy-Item $nsis.FullName "artifacts\NIVAKO-Softphone-Setup-0.3.0.exe" -Force
 
       - name: Upload Windows artifacts
         if: always()
@@ -232,9 +207,7 @@ jobs:
           path: |
             artifacts/tauri-build.log
             artifacts/NIVAKO-Softphone-Setup-0.3.0.exe
-            artifacts/NIVAKO-Softphone-0.3.0.msi
             artifacts/nivako-softphone-windows-portable.zip
-            ${{ env.SOFTPHONE_DIR }}/src-tauri/target/release/bundle/**/*.msi
             ${{ env.SOFTPHONE_DIR }}/src-tauri/target/release/bundle/**/*.exe
 
       - name: Fail if Tauri build failed
