@@ -376,6 +376,53 @@ h2 small {
   background: var(--brand);
 }
 
+.contact-context-menu {
+  position: fixed;
+  z-index: 80;
+  display: grid;
+  width: 238px;
+  overflow: hidden;
+  border: 1px solid #3d3a35;
+  border-radius: 9px;
+  padding: 6px;
+  color: #f8f5ee;
+  background: #1d1d1d;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.36);
+}
+
+.contact-context-menu button {
+  border-radius: 6px;
+  padding: 10px 12px;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+}
+
+.contact-context-menu button:hover { color: #111112; background: var(--brand); }
+.contact-context-menu .context-danger { color: #ff9da4; }
+.contact-context-menu .context-danger:hover { color: #fff; background: var(--bad); }
+.context-separator { height: 1px; margin: 5px 4px; background: #45423d; }
+
+.contact-editor-backdrop { z-index: 90; }
+.contact-editor {
+  width: min(520px, 100%);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--paper);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.32);
+}
+.contact-editor header { display: flex; align-items: center; justify-content: space-between; gap: 20px; border-bottom: 1px solid var(--line); padding: 20px 22px; }
+.contact-editor header p { margin-top: 3px; color: var(--muted); }
+.contact-editor form { padding: 22px; }
+.phone-editor { border: 1px solid var(--line); border-radius: 12px; padding: 14px; display: grid; gap: 10px; }
+.phone-editor legend { padding: 0 6px; color: var(--muted); }
+.phone-editor-row { display: grid; grid-template-columns: 150px minmax(170px, 1fr) auto 34px; gap: 8px; align-items: center; }
+.phone-editor-row select, .phone-editor-row input { min-width: 0; }
+.primary-phone { display: flex !important; flex-direction: row !important; align-items: center; gap: 5px; white-space: nowrap; }
+.primary-phone input { width: auto !important; }
+.icon-button { width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--line); background: transparent; color: var(--muted); }
+.secondary.compact { justify-self: start; padding: 8px 12px; }
+
 .phone-chips {
   display: flex;
   flex-wrap: wrap;

@@ -2,18 +2,20 @@ import "./styles.css";
 import brandLogoUrl from "./assets/nivako-softphone-logo.png";
 import { loadAudioDevices, type AudioDeviceState } from "./audioDevices";
 import { parseManyVCards } from "./carddav";
+import { normalizePhoneNumber } from "./phoneNumber";
 import { syncCardDavContacts } from "./contactsRepository";
-import { getSipStatusNative, hasSecretNative, isTauriRuntime, loadSecretNative, saveSecretNative } from "./nativeBridge";
+import { deleteCardDavContactNative, getSipStatusNative, hasSecretNative, isTauriRuntime, loadSecretNative, saveSecretNative, writeCardDavContactNative } from "./nativeBridge";
 import { canUseNativeTelephony, NativeTelephonyAdapter } from "./nativeTelephony";
 import { searchContacts } from "./search";
 import { loadContacts, loadFavoriteIds, loadHistory, loadSettings, saveContacts, saveFavoriteIds, saveHistory, saveSettings } from "./storage";
 import { SafeTelephonyAdapter, WebRtcSipAdapter, type TelephonyAdapter } from "./telephony";
-import type { CallEntry, Contact, NativeSipSnapshot, Settings, SoftphoneState } from "./types";
+import type { CallEntry, Contact, ContactPhone, NativeSipSnapshot, PhoneLabel, Settings, SoftphoneState } from "./types";
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
 const root = app;
-const appVersion = "0.3.0";
+const appVersion = "0.3.1";
+const appBuild = import.meta.env.VITE_BUILD_NUMBER || import.meta.env.VITE_COMMIT_SHA?.slice(0, 8) || "lokal";
 const cardDavRefreshMs = 15 * 60 * 1000;
 const sipReconnectMs = 60 * 1000;
 const sipStatusPollMs = 2000;
@@ -93,6 +95,9 @@ let settingsOpen = false;
 let callAction: "transfer" | "second" | null = null;
 let callActionQuery = "";
 let hasSecondCall = false;
+let contactMenu: { contactId: string; x: number; y: number } | null = null;
+let editingContactId: string | null = null;
+let editingContactDraft: Contact | null = null;
 let cardDavTimer: number | undefined;
 let sipReconnectTimer: number | undefined;
 let sipStatusTimer: number | undefined;
@@ -198,8 +203,9 @@ function normalizeCallState(value: string): SoftphoneState["callState"] {
 function applyNativeSipSnapshot(snapshot: NativeSipSnapshot): void {
   const previousCallState = state.callState;
   const remoteNumber = snapshot.remote_number?.trim() || "";
+  const normalizedRemoteNumber = normalizePhoneNumber(remoteNumber);
   const remoteContact = remoteNumber
-    ? contacts.find((contact) => contact.phones.some((phone) => phone.normalized === remoteNumber || phone.raw === remoteNumber))
+    ? contacts.find((contact) => contact.phones.some((phone) => phone.normalized === normalizedRemoteNumber || phone.raw === remoteNumber))
     : undefined;
   const nextState = {
     ...state,
@@ -343,6 +349,90 @@ async function registerSip(): Promise<void> {
 function setActiveNumber(number: string, contact?: Contact): void {
   state = { ...state, activeNumber: number, activeContact: contact };
   notice = contact ? `${contact.displayName} ist ausgewaehlt.` : "Nummer ist ausgewaehlt.";
+  render();
+}
+
+function selectedContact(): Contact | undefined {
+  if (editingContactDraft) return editingContactDraft;
+  const id = editingContactId || contactMenu?.contactId;
+  return id ? contacts.find((contact) => contact.id === id) : undefined;
+}
+
+function closeContactOverlays(): void {
+  contactMenu = null;
+  editingContactId = null;
+  editingContactDraft = null;
+}
+
+async function copyContactValue(value: string, label: string): Promise<void> {
+  contactMenu = null;
+  try {
+    await navigator.clipboard.writeText(value);
+    notice = `${label} wurde kopiert.`;
+  } catch {
+    notice = `${label} konnte nicht kopiert werden.`;
+  }
+  render();
+}
+
+async function deleteContact(contactId: string): Promise<void> {
+  const contact = contacts.find((candidate) => candidate.id === contactId);
+  if (!contact || !window.confirm(`Kontakt „${contact.displayName}“ aus dem gemeinsamen Telefonbuch entfernen? Der CRM-Datensatz wird dabei nicht endgültig gelöscht.`)) return;
+  try {
+    if (contact.source === "carddav") {
+      if (!isTauriRuntime()) throw new Error("CardDAV-Schreiben ist nur in der Desktop-App verfügbar.");
+      await deleteCardDavContactNative(settings, contact, cardDavPassword);
+    }
+  } catch (error) {
+    notice = errorMessage(error, "Kontakt konnte nicht aus CardDAV entfernt werden");
+    render();
+    return;
+  }
+  contacts = contacts.filter((candidate) => candidate.id !== contactId);
+  if (state.activeContact?.id === contactId) state = { ...state, activeContact: undefined };
+  persistContacts();
+  closeContactOverlays();
+  notice = `${contact.displayName} wurde aus dem Telefonbuch entfernt; der CRM-Datensatz bleibt erhalten.`;
+  render();
+}
+
+async function saveContactEdit(formElement: HTMLFormElement): Promise<void> {
+  if (!editingContactId) return;
+  const form = new FormData(formElement);
+  const displayName = String(form.get("displayName") || "").trim();
+  const rawPhones = form.getAll("phone").map(String);
+  const labels = form.getAll("phoneLabel").map(String) as PhoneLabel[];
+  const primaryIndex = Number(form.get("primaryPhone") || 0);
+  const phones: ContactPhone[] = rawPhones.map((raw, index) => ({
+    raw: raw.trim(), normalized: normalizePhoneNumber(raw), label: labels[index] || "other", primary: index === primaryIndex
+  })).filter((phone) => phone.raw);
+  if (!displayName || !phones.length) {
+    notice = "Name und mindestens eine Telefonnummer dürfen nicht leer sein.";
+    render();
+    return;
+  }
+  const base = editingContactDraft || contacts.find((contact) => contact.id === editingContactId);
+  if (!base) return;
+  let updated: Contact = {
+    ...base,
+    displayName,
+    organization: String(form.get("organization") || "").trim() || undefined,
+    email: String(form.get("email") || "").trim() || undefined,
+    phones
+  };
+  try {
+    if (isTauriRuntime()) updated = await writeCardDavContactNative(settings, updated, cardDavPassword);
+    else updated = { ...updated, source: "local" };
+  } catch (error) {
+    notice = errorMessage(error, "Kontakt konnte nicht in CardDAV gespeichert werden");
+    render();
+    return;
+  }
+  const existingIndex = contacts.findIndex((contact) => contact.id === editingContactId);
+  contacts = existingIndex === -1 ? [...contacts, updated] : contacts.map((contact, index) => index === existingIndex ? updated : contact);
+  persistContacts();
+  closeContactOverlays();
+  notice = `${updated.displayName} wurde in CardDAV gespeichert und wird mit Espo abgeglichen.`;
   render();
 }
 
@@ -549,6 +639,52 @@ function renderCallActionModal(): string {
   </section></div>`;
 }
 
+function renderContactMenu(): string {
+  if (!contactMenu) return "";
+  const contact = selectedContact();
+  if (!contact) return "";
+  const phone = contact.phones[0]?.normalized || contact.phones[0]?.raw || "";
+  return `<div class="contact-context-menu" role="menu" style="left:${contactMenu.x}px;top:${contactMenu.y}px">
+    <button role="menuitem" data-contact-action="call">Anrufen</button>
+    <button role="menuitem" data-contact-action="copy-phone" ${phone ? "" : "disabled"}>Nummer kopieren</button>
+    ${contact.email ? '<button role="menuitem" data-contact-action="copy-email">E-Mail kopieren</button>' : ""}
+    <button role="menuitem" data-contact-action="favorite">${contact.favorite ? "Aus Favoriten entfernen" : "Zu Favoriten hinzufügen"}</button>
+    <span class="context-separator"></span>
+    <button role="menuitem" data-contact-action="edit">Kontakt bearbeiten</button>
+    <button class="context-danger" role="menuitem" data-contact-action="delete">Kontakt löschen</button>
+  </div>`;
+}
+
+function renderContactEditor(): string {
+  if (!editingContactId) return "";
+  const contact = selectedContact();
+  if (!contact) return "";
+  return `<div class="settings-modal-backdrop contact-editor-backdrop"><section class="contact-editor" role="dialog" aria-modal="true" aria-labelledby="contact-editor-title">
+    <header><div><h1 id="contact-editor-title">${contact.source === "local" ? "Kontakt erstellen" : "Kontakt bearbeiten"}</h1><p>Wird in CardDAV gespeichert und anschließend mit Espo abgeglichen</p></div><button class="modal-close" id="close-contact-editor" aria-label="Schließen">×</button></header>
+    <form class="settings-list" id="contact-editor-form">
+      <label><span>Name</span><input name="displayName" required value="${escapeHtml(contact.displayName)}" /></label>
+      <label><span>Firma</span><input name="organization" value="${escapeHtml(contact.organization || "")}" /></label>
+      <label><span>E-Mail</span><input name="email" type="email" value="${escapeHtml(contact.email || "")}" /></label>
+      <fieldset class="phone-editor"><legend>Telefonnummern</legend><div id="phone-editor-rows">
+        ${contact.phones.map((phone, index) => renderPhoneEditorRow(phone, index)).join("") || renderPhoneEditorRow({ label: "work", raw: "", normalized: "", primary: true }, 0)}
+      </div><button class="secondary compact" type="button" id="add-phone-row">+ Weitere Nummer</button></fieldset>
+      <div class="modal-row"><button class="secondary" type="button" id="cancel-contact-editor">Abbrechen</button><button class="primary" type="submit">Speichern</button></div>
+    </form>
+  </section></div>`;
+}
+
+const phoneLabelNames: Record<PhoneLabel, string> = {
+  work: "Geschäftlich", workMobile: "Geschäftliches Handy", mobile: "Handy", home: "Privat",
+  homeMobile: "Privates Handy", fax: "Fax", main: "Zentrale", other: "Sonstige"
+};
+
+function renderPhoneEditorRow(phone: ContactPhone, index: number): string {
+  const options = Object.entries(phoneLabelNames).map(([value, label]) => `<option value="${value}" ${phone.label === value ? "selected" : ""}>${label}</option>`).join("");
+  return `<div class="phone-editor-row"><select name="phoneLabel">${options}</select><input name="phone" value="${escapeHtml(phone.raw)}" placeholder="Telefonnummer" />
+    <label class="primary-phone"><input type="radio" name="primaryPhone" value="${index}" ${phone.primary || index === 0 ? "checked" : ""} /> Bevorzugt</label>
+    <button type="button" class="icon-button remove-phone-row" title="Nummer entfernen">×</button></div>`;
+}
+
 function appendDigit(digit: string): void {
   state = { ...state, activeNumber: `${state.activeNumber}${digit}` };
   if (state.callState !== "idle") void telephony.sendDtmf(digit);
@@ -687,7 +823,7 @@ function renderContact(contact: Contact): string {
             ${extraCount ? `<small>+${extraCount}</small>` : ""}
           </span>
         </button>
-        ${contact.phones.length > 1 ? `<div class="phone-chips">${contact.phones.slice(1).map((phone) => `<button class="phone-chip" data-number="${escapeHtml(phone.normalized)}" data-contact="${escapeHtml(contact.id)}">${escapeHtml(phone.label)} ${escapeHtml(phone.raw)}</button>`).join("")}</div>` : ""}
+        ${contact.phones.length > 1 ? `<div class="phone-chips">${contact.phones.slice(1).map((phone) => `<button class="phone-chip" data-number="${escapeHtml(phone.normalized)}" data-contact="${escapeHtml(contact.id)}">${escapeHtml(phoneLabelNames[phone.label])} ${escapeHtml(phone.raw)}</button>`).join("")}</div>` : ""}
       </div>
       <button class="favorite-button ${contact.favorite ? "active" : ""}" title="Favorit umschalten" data-favorite="${escapeHtml(contact.id)}">${contact.favorite ? "★" : "☆"}</button>
     </div>
@@ -803,6 +939,7 @@ function renderMainPanel(visibleContacts: Contact[]): string {
           <h1>Telefonbuch</h1>
           <p>${contacts.length} lokale Kontakte ${syncState === "ok" ? "· CardDAV synchronisiert" : ""}</p>
         </div>
+        <button class="sync-button" id="new-contact">+ Kontakt</button>
       </div>
       <input class="search" id="search" placeholder="Name, Firma oder Nummer suchen" value="${escapeHtml(query)}" />
       <div class="contact-list">
@@ -871,6 +1008,7 @@ function renderSettingsModal(): string {
 }
 
 function render(): void {
+  const previousContactScroll = document.querySelector<HTMLElement>(".contact-list")?.scrollTop;
   const visibleContacts = searchContacts(contacts, query);
   const keypad = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"];
   if (notice !== lastToastNotice) {
@@ -888,7 +1026,7 @@ function render(): void {
       <aside class="sidebar">
         <div class="brand">
           <img class="brand-logo" src="${brandLogoUrl}" alt="NIVAKO Softphone – VoIP Client" />
-          <small>v${appVersion} · ${state.registered ? `${escapeHtml(settings.sipExtension)} registriert` : "SIP nicht registriert"}</small>
+          <small>v${appVersion} · Build ${escapeHtml(appBuild)} · ${state.registered ? `${escapeHtml(settings.sipExtension)} registriert` : "SIP nicht registriert"}</small>
         </div>
         <nav class="nav">
           ${navButton("contacts", "Kontakte")}
@@ -951,13 +1089,104 @@ function render(): void {
       ${state.callState === "ringing" ? `<div class="in-app-call-backdrop"><section class="in-app-call" role="dialog" aria-modal="true"><div class="incoming-avatar">${state.activeContact?.photoUrl ? `<img src="${escapeHtml(state.activeContact.photoUrl)}" alt="" />` : escapeHtml(incomingInitials)}</div><div class="incoming-copy"><span>Eingehender Anruf</span><strong>${escapeHtml(incomingName)}</strong><small>${escapeHtml(state.activeNumber || state.remoteIdentity || "")}</small></div><div class="incoming-actions"><button class="danger" id="overlay-reject">Ablehnen</button><button class="primary" id="overlay-accept">Annehmen</button></div></section></div>` : ""}
       ${settingsOpen ? renderSettingsModal() : ""}
       ${renderCallActionModal()}
+      ${renderContactMenu()}
+      ${renderContactEditor()}
     </section>
   `;
 
   bindEvents();
+  if (previousContactScroll !== undefined) {
+    const list = document.querySelector<HTMLElement>(".contact-list");
+    if (list) list.scrollTop = previousContactScroll;
+  }
+}
+
+function bindPhoneRowEvents(): void {
+  const rows = Array.from(document.querySelectorAll<HTMLElement>(".phone-editor-row"));
+  rows.forEach((row, index) => {
+    const radio = row.querySelector<HTMLInputElement>('input[name="primaryPhone"]');
+    if (radio) radio.value = String(index);
+    row.querySelector<HTMLButtonElement>(".remove-phone-row")?.addEventListener("click", () => {
+      if (document.querySelectorAll(".phone-editor-row").length <= 1) return;
+      const wasPrimary = radio?.checked;
+      row.remove();
+      const remaining = Array.from(document.querySelectorAll<HTMLElement>(".phone-editor-row"));
+      remaining.forEach((item, nextIndex) => {
+        const itemRadio = item.querySelector<HTMLInputElement>('input[name="primaryPhone"]');
+        if (itemRadio) itemRadio.value = String(nextIndex);
+      });
+      if (wasPrimary) remaining[0]?.querySelector<HTMLInputElement>('input[name="primaryPhone"]')?.click();
+    }, { once: true });
+  });
 }
 
 function bindEvents(): void {
+  document.addEventListener("click", (event) => {
+    if (contactMenu && !(event.target as Element).closest(".contact-context-menu")) {
+      contactMenu = null;
+      render();
+    }
+  }, { once: true });
+
+  document.querySelectorAll<HTMLElement>(".contact-row").forEach((row) => {
+    row.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      const contactId = row.querySelector<HTMLElement>("[data-contact]")?.dataset.contact;
+      if (!contactId) return;
+      contactMenu = {
+        contactId,
+        x: Math.min(event.clientX, window.innerWidth - 250),
+        y: Math.min(event.clientY, window.innerHeight - 310)
+      };
+      render();
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>("[data-contact-action]").forEach((button) => button.addEventListener("click", () => {
+    const contact = selectedContact();
+    if (!contact) return;
+    const action = button.dataset.contactAction;
+    if (action === "call") {
+      contactMenu = null;
+      setActiveNumber(contact.phones[0]?.normalized || contact.phones[0]?.raw || "", contact);
+      void dial();
+    }
+    if (action === "copy-phone") void copyContactValue(contact.phones[0]?.raw || "", "Telefonnummer");
+    if (action === "copy-email") void copyContactValue(contact.email || "", "E-Mail-Adresse");
+    if (action === "favorite") {
+      contactMenu = null;
+      toggleFavorite(contact.id);
+    }
+    if (action === "edit") {
+      editingContactId = contact.id;
+      editingContactDraft = { ...contact, phones: contact.phones.map((phone) => ({ ...phone })) };
+      contactMenu = null;
+      render();
+    }
+    if (action === "delete") void deleteContact(contact.id);
+  }));
+
+  document.querySelector<HTMLButtonElement>("#new-contact")?.addEventListener("click", () => {
+    editingContactId = `local-${crypto.randomUUID()}`;
+    editingContactDraft = { id: editingContactId, displayName: "", phones: [{ label: "work", raw: "", normalized: "", primary: true }], source: "local" };
+    render();
+  });
+
+  const closeContactEditor = () => { closeContactOverlays(); render(); };
+  document.querySelector<HTMLButtonElement>("#close-contact-editor")?.addEventListener("click", closeContactEditor);
+  document.querySelector<HTMLButtonElement>("#cancel-contact-editor")?.addEventListener("click", closeContactEditor);
+  document.querySelector<HTMLFormElement>("#contact-editor-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void saveContactEdit(event.currentTarget as HTMLFormElement);
+  });
+  document.querySelector<HTMLButtonElement>("#add-phone-row")?.addEventListener("click", () => {
+    const rows = document.querySelector<HTMLElement>("#phone-editor-rows");
+    if (!rows) return;
+    rows.insertAdjacentHTML("beforeend", renderPhoneEditorRow({ label: "other", raw: "", normalized: "" }, rows.children.length));
+    bindPhoneRowEvents();
+  });
+  bindPhoneRowEvents();
+
   document.querySelectorAll<HTMLButtonElement>("[data-view]").forEach((button) => {
     button.addEventListener("click", () => {
       activeView = button.dataset.view as View;

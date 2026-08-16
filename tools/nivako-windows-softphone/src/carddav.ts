@@ -39,13 +39,39 @@ function getPropertyValue(line: string): string {
 
 function phoneLabelFromLine(line: string): PhoneLabel {
   const lower = line.toLowerCase();
+  if (lower.includes("fax")) return "fax";
+  if (lower.includes("cell") && lower.includes("work")) return "workMobile";
+  if (lower.includes("cell") && lower.includes("home")) return "homeMobile";
   if (lower.includes("cell") || lower.includes("mobile")) return "mobile";
   if (lower.includes("home")) return "home";
   if (lower.includes("work")) return "work";
+  if (lower.includes("main")) return "main";
   return "other";
 }
 
-export function parseVCard(vcard: string, href: string = crypto.randomUUID()): Contact {
+function escapeVCardValue(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/,/g, "\\,").replace(/;/g, "\\;");
+}
+
+function phoneTypes(phone: ContactPhone): string {
+  const types: Record<PhoneLabel, string> = {
+    work: "WORK,VOICE", workMobile: "WORK,CELL", mobile: "CELL", home: "HOME,VOICE",
+    homeMobile: "HOME,CELL", fax: "FAX", main: "MAIN,VOICE", other: "VOICE"
+  };
+  return `${types[phone.label]}${phone.primary ? ",PREF" : ""}`;
+}
+
+export function serializeVCard(contact: Contact): string {
+  const uid = contact.id.replace(/^.*\//, "").replace(/\.vcf$/i, "") || crypto.randomUUID();
+  const lines = ["BEGIN:VCARD", "VERSION:3.0", `UID:${escapeVCardValue(uid)}`, `FN:${escapeVCardValue(contact.displayName)}`, `N:${escapeVCardValue(contact.displayName)};;;;`];
+  if (contact.organization) lines.push(`ORG:${escapeVCardValue(contact.organization)}`);
+  if (contact.email) lines.push(`EMAIL;TYPE=INTERNET:${escapeVCardValue(contact.email)}`);
+  contact.phones.filter((phone) => phone.raw.trim()).forEach((phone) => lines.push(`TEL;TYPE=${phoneTypes(phone)}:${escapeVCardValue(phone.raw.trim())}`));
+  lines.push("REV:" + new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z"), "END:VCARD");
+  return `${lines.join("\r\n")}\r\n`;
+}
+
+export function parseVCard(vcard: string, href: string = crypto.randomUUID(), etag?: string): Contact {
   const lines = unfoldVCard(vcard);
   const phones: ContactPhone[] = [];
   let displayName = "";
@@ -78,7 +104,8 @@ export function parseVCard(vcard: string, href: string = crypto.randomUUID()): C
       phones.push({
         label: phoneLabelFromLine(line),
         raw: value,
-        normalized: normalizePhoneNumber(value)
+        normalized: normalizePhoneNumber(value),
+        primary: /(?:TYPE=|[,;])PREF(?:[,;:]|$)/i.test(line)
       });
     }
   }
@@ -92,7 +119,8 @@ export function parseVCard(vcard: string, href: string = crypto.randomUUID()): C
     email: email || undefined,
     photoUrl: photoUrl || undefined,
     phones,
-    source: "carddav"
+    source: "carddav",
+    etag
   };
 }
 
@@ -135,7 +163,7 @@ export async function fetchCardDavContacts(config: CardDavConfig): Promise<Conta
   }
 
   const xml = await response.text();
-  return parseCardDavMultistatus(xml).map((resource) => parseVCard(resource.vcard, resource.href));
+  return parseCardDavMultistatus(xml).map((resource) => parseVCard(resource.vcard, resource.href, resource.etag));
 }
 
 export async function fetchCardDavContactsFromLocalApi(): Promise<Contact[]> {
@@ -145,7 +173,7 @@ export async function fetchCardDavContactsFromLocalApi(): Promise<Contact[]> {
     throw new Error(payload.message || `CardDAV API failed: HTTP ${response.status}`);
   }
 
-  return parseCardDavMultistatus(payload.xml).map((resource) => parseVCard(resource.vcard, resource.href));
+  return parseCardDavMultistatus(payload.xml).map((resource) => parseVCard(resource.vcard, resource.href, resource.etag));
 }
 
 export function parseManyVCards(input: string): Contact[] {

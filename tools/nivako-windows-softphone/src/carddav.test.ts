@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseVCard } from "./carddav";
+import { parseVCard, serializeVCard } from "./carddav";
 import { normalizePhoneNumber } from "./phoneNumber";
 import { searchContacts } from "./search";
 
@@ -37,6 +37,21 @@ PHOTO;ENCODING=b;TYPE=PNG:aGVsbG8=
 TEL:+491234
 END:VCARD`);
     expect(contact.photoUrl).toBe("data:image/png;base64,aGVsbG8=");
+  });
+
+  it("preserves multiple typed phone numbers and primary status", () => {
+    const contact = parseVCard(`BEGIN:VCARD
+VERSION:3.0
+FN:Mehrere Nummern
+TEL;TYPE=WORK,VOICE:+495021123
+TEL;TYPE=HOME,CELL,PREF:+491701234
+TEL;TYPE=FAX:+495021999
+END:VCARD`);
+    expect(contact.phones.map(({ label, primary }) => [label, Boolean(primary)])).toEqual([
+      ["work", false], ["homeMobile", true], ["fax", false]
+    ]);
+    const roundTrip = parseVCard(serializeVCard(contact));
+    expect(roundTrip.phones.map((phone) => phone.label)).toEqual(["work", "homeMobile", "fax"]);
   });
 });
 

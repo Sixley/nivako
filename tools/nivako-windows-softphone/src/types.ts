@@ -1,9 +1,10 @@
-export type PhoneLabel = "work" | "mobile" | "home" | "other";
+export type PhoneLabel = "work" | "workMobile" | "mobile" | "home" | "homeMobile" | "fax" | "main" | "other";
 
 export interface ContactPhone {
   label: PhoneLabel;
   raw: string;
   normalized: string;
+  primary?: boolean;
 }
 
 export interface Contact {
@@ -15,6 +16,7 @@ export interface Contact {
   favorite?: boolean;
   source?: "carddav" | "local";
   photoUrl?: string;
+  etag?: string;
 }
 
 export interface CallEntry {

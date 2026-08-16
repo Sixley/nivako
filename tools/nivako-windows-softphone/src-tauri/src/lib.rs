@@ -46,6 +46,12 @@ struct CardDavSyncResult {
     tried: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct CardDavWriteResult {
+    href: String,
+    etag: Option<String>,
+}
+
 type LinphoneCore = c_void;
 type LinphoneCall = c_void;
 type LinphoneAddress = c_void;
@@ -1487,6 +1493,29 @@ fn report_carddav_url(
     Ok(None)
 }
 
+fn carddav_client_and_auth(
+    username: &str,
+    password: Option<String>,
+) -> Result<(reqwest::blocking::Client, String), AppError> {
+    let password = stored_or_supplied_secret(CARDDAV_SERVICE, username, password)?;
+    let auth = base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .user_agent("NIVAKO Softphone CardDAV")
+        .build()?;
+    Ok((client, auth))
+}
+
+fn resolve_carddav_resource_url(base: &str, href: &str) -> Result<String, AppError> {
+    if href.starts_with("http://") || href.starts_with("https://") {
+        return Ok(href.to_string());
+    }
+    let base_url = reqwest::Url::parse(base)
+        .map_err(|error| AppError::Message(format!("Ungültige CardDAV-Adresse: {error}")))?;
+    base_url.join(href).map(|url| url.to_string())
+        .map_err(|error| AppError::Message(format!("Ungültiger CardDAV-Kontaktpfad: {error}")))
+}
+
 fn sip_register_linphone(
     sip_server: &str,
     sip_extension: &str,
@@ -1939,12 +1968,7 @@ fn sync_carddav(
     username: String,
     password: Option<String>,
 ) -> Result<CardDavSyncResult, AppError> {
-    let password = stored_or_supplied_secret(CARDDAV_SERVICE, &username, password)?;
-    let auth = base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .user_agent("NIVAKO Softphone CardDAV")
-        .build()?;
+    let (client, auth) = carddav_client_and_auth(&username, password)?;
 
     let candidates = carddav_candidate_urls(&url, &username);
     let mut tried = Vec::new();
@@ -1965,6 +1989,65 @@ fn sync_carddav(
         "CardDAV hat unter keiner getesteten Adresse Kontakte geliefert: {}",
         tried.join(", ")
     )))
+}
+
+#[tauri::command]
+fn write_carddav_contact(
+    url: String,
+    username: String,
+    password: Option<String>,
+    href: Option<String>,
+    etag: Option<String>,
+    vcard: String,
+) -> Result<CardDavWriteResult, AppError> {
+    let (client, auth) = carddav_client_and_auth(&username, password)?;
+    let is_create = href.is_none();
+    let resource_href = href.unwrap_or_else(|| format!("{}.vcf", uuid::Uuid::new_v4()));
+    let resource_url = resolve_carddav_resource_url(&normalize_url_slash(&url), &resource_href)?;
+    let mut request = client.put(&resource_url)
+        .header("Authorization", format!("Basic {auth}"))
+        .header("Content-Type", "text/vcard; charset=utf-8")
+        .body(vcard);
+    request = if let Some(value) = etag.filter(|value| !value.is_empty()) {
+        request.header("If-Match", value)
+    } else if is_create {
+        request.header("If-None-Match", "*")
+    } else { request };
+    let response = request.send()?;
+    let status = response.status();
+    if status.as_u16() == 412 {
+        return Err(AppError::Message("Der Kontakt wurde zwischenzeitlich geändert. Bitte CardDAV aktualisieren und erneut bearbeiten.".to_string()));
+    }
+    if !status.is_success() && status.as_u16() != 201 && status.as_u16() != 204 {
+        return Err(AppError::Message(format!("CardDAV konnte den Kontakt nicht speichern: HTTP {status}")));
+    }
+    let response_etag = response.headers().get(reqwest::header::ETAG)
+        .and_then(|value| value.to_str().ok()).map(str::to_string);
+    Ok(CardDavWriteResult { href: resource_url, etag: response_etag })
+}
+
+#[tauri::command]
+fn delete_carddav_contact(
+    url: String,
+    username: String,
+    password: Option<String>,
+    href: String,
+    etag: Option<String>,
+) -> Result<(), AppError> {
+    let (client, auth) = carddav_client_and_auth(&username, password)?;
+    let resource_url = resolve_carddav_resource_url(&normalize_url_slash(&url), &href)?;
+    let mut request = client.delete(resource_url).header("Authorization", format!("Basic {auth}"));
+    if let Some(value) = etag.filter(|value| !value.is_empty()) {
+        request = request.header("If-Match", value);
+    }
+    let status = request.send()?.status();
+    if status.as_u16() == 412 {
+        return Err(AppError::Message("Der Kontakt wurde zwischenzeitlich geändert. Bitte CardDAV aktualisieren.".to_string()));
+    }
+    if !status.is_success() && status.as_u16() != 404 {
+        return Err(AppError::Message(format!("CardDAV konnte den Kontakt nicht entfernen: HTTP {status}")));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -2793,6 +2876,8 @@ pub fn run() {
             has_secret,
             get_secret,
             sync_carddav,
+            write_carddav_contact,
+            delete_carddav_contact,
             sip_register,
             sip_status,
             sip_dial,

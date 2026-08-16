@@ -1,4 +1,4 @@
-import { parseCardDavMultistatus, parseVCard } from "./carddav";
+import { parseCardDavMultistatus, parseVCard, serializeVCard } from "./carddav";
 import type { Contact, NativeSipSnapshot, NativeSipStatus, Settings } from "./types";
 
 type Invoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
@@ -53,7 +53,22 @@ export async function syncCardDavNative(settings: Settings, password?: string): 
   });
 
   lastCardDavDiagnostic = `native URL ${result.url}; ${result.vcard_count} vCards; ${result.tried.length} Pfad(e) getestet`;
-  return parseCardDavMultistatus(result.xml).map((resource) => parseVCard(resource.vcard, resource.href));
+  return parseCardDavMultistatus(result.xml).map((resource) => parseVCard(resource.vcard, resource.href, resource.etag));
+}
+
+export async function writeCardDavContactNative(settings: Settings, contact: Contact, password?: string): Promise<Contact> {
+  const result = await tauriInvoke<{ href: string; etag?: string }>("write_carddav_contact", {
+    url: settings.cardDavUrl, username: settings.cardDavUser, password: password || null,
+    href: contact.source === "carddav" ? contact.id : null, etag: contact.etag || null, vcard: serializeVCard(contact)
+  });
+  return { ...contact, id: result.href, etag: result.etag, source: "carddav" };
+}
+
+export async function deleteCardDavContactNative(settings: Settings, contact: Contact, password?: string): Promise<void> {
+  await tauriInvoke<void>("delete_carddav_contact", {
+    url: settings.cardDavUrl, username: settings.cardDavUser, password: password || null,
+    href: contact.id, etag: contact.etag || null
+  });
 }
 
 export async function saveSecretNative(service: string, account: string, password: string): Promise<void> {
