@@ -270,6 +270,31 @@ h2 small {
   overscroll-behavior: contain;
 }
 
+.directory-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
+.layout-switch { display: flex; gap: 4px; padding: 3px; border: 1px solid var(--line); border-radius: 8px; background: #eee8df; }
+.layout-switch button { border-radius: 6px; padding: 7px 11px; color: var(--muted); background: transparent; font-weight: 750; }
+.layout-switch button.active { color: var(--ink); background: var(--brand); }
+.contact-directory { display: grid; flex: 1 1 auto; grid-template-columns: minmax(0, 1fr) 24px; min-height: 0; margin-top: 12px; }
+.grouped-contact-list { margin-top: 0; padding-right: 10px; }
+.contact-group { display: grid; gap: 7px; scroll-margin-top: 8px; }
+.contact-group > h2 { position: sticky; top: 0; z-index: 3; margin: 0; border-bottom: 1px solid var(--line); padding: 6px 4px; color: var(--brand-strong); background: rgba(255,253,250,.96); font-size: 14px; }
+.alphabet-rail { display: flex; flex-direction: column; align-items: stretch; justify-content: center; min-height: 0; }
+.alphabet-rail button { flex: 1 1 auto; min-height: 17px; padding: 0; color: #9a6500; background: transparent; font-size: 10px; font-weight: 900; }
+.alphabet-rail button:hover { border-radius: 5px; color: var(--ink); background: var(--brand); }
+.company-group { display: grid; gap: 7px; }
+.company-toggle { display: grid; grid-template-columns: 20px minmax(0,1fr) auto; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 12px; color: var(--ink); background: #f7f3ec; text-align: left; }
+.company-toggle small { color: var(--muted); }
+.list-subheading { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.history-entry.callback-open { border-left: 4px solid var(--brand); border-radius: 7px; background: #fffaf0; }
+.live-call-status { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin: -5px 0 10px; }
+.live-call-status span { border-radius: 999px; padding: 4px 8px; color: var(--muted); background: #eee9e1; font-size: 11px; }
+.compact-mode { grid-template-columns: minmax(410px, 1fr) 330px; grid-template-rows: 62px minmax(0,1fr); }
+.compact-mode .topbar { padding-block: 7px; }
+.compact-mode .contacts-panel, .compact-mode .phone-panel { padding: 16px; }
+.compact-mode .contact-row, .compact-mode .contact-select { min-height: 52px; }
+.compact-mode .contact-select { padding-block: 5px; }
+.compact-mode .keypad button { height: 44px; }
+
 .contact-row {
   display: grid;
   flex: 0 0 auto;

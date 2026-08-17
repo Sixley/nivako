@@ -40,6 +40,7 @@ const defaultSettings: Settings = {
   speakerVolume: 85,
   microphoneVolume: 70,
   ringtone: "standard"
+  ,compactMode: false
 };
 
 let settings = loadSettings(defaultSettings);
@@ -93,7 +94,7 @@ let historyQuery = "";
 let historyFilter: "all" | CallEntry["direction"] = "all";
 let activeView: View = "contacts";
 let settingsOpen = false;
-let appVersion = "0.7.0";
+let appVersion = "0.8.0";
 let callAction: "transfer" | "second" | null = null;
 let callActionQuery = "";
 let hasSecondCall = false;
@@ -130,6 +131,9 @@ let editingHistoryId: string | null = null;
 let assigningHistoryId: string | null = null;
 let microphoneRecordingUrl = "";
 let ringtoneTimer: number | undefined;
+let contactLayout: "alphabetical" | "companies" = "alphabetical";
+let expandedCompanies = new Set<string>();
+let callClockTimer: number | undefined;
 
 function stopRingtone(): void {
   if (ringtoneTimer !== undefined) window.clearInterval(ringtoneTimer);
@@ -327,6 +331,91 @@ function applyFavorites(nextContacts: Contact[], favoriteIds: string[]): Contact
     .map((contact) => ({ ...contact, favorite: contact.favorite || favoriteSet.has(contact.id) }));
 }
 
+function contactSortName(contact: Contact): string {
+  const parts = contact.displayName.trim().split(/\s+/).filter(Boolean);
+  if (parts.length > 1) return `${parts.at(-1)} ${parts.slice(0, -1).join(" ")}`;
+  return contact.displayName || contact.organization || "#";
+}
+
+function contactLetter(contact: Contact): string {
+  const first = contactSortName(contact).normalize("NFD").replace(/[\u0300-\u036f]/g, "").charAt(0).toUpperCase();
+  return /^[A-Z]$/.test(first) ? first : "#";
+}
+
+function sortedContacts(items: Contact[]): Contact[] {
+  return [...items].sort((a, b) => contactSortName(a).localeCompare(contactSortName(b), "de", { sensitivity: "base" }));
+}
+
+function frequentContactIds(): string[] {
+  const counts = new Map<string, number>();
+  for (const entry of callHistory) {
+    const normalized = normalizePhoneNumber(entry.number);
+    const contact = contacts.find((candidate) => candidate.phones.some((phone) => phone.normalized === normalized));
+    if (contact) counts.set(contact.id, (counts.get(contact.id) || 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([id]) => id);
+}
+
+function duplicateGroups(): Contact[][] {
+  const groups: Contact[][] = [];
+  const used = new Set<string>();
+  for (const contact of contacts) {
+    if (used.has(contact.id)) continue;
+    const peers = contacts.filter((candidate) => candidate.id !== contact.id && (
+      Boolean(contact.email && candidate.email && contact.email.toLowerCase() === candidate.email.toLowerCase())
+      || contact.phones.some((phone) => phone.normalized && candidate.phones.some((other) => other.normalized === phone.normalized))
+    ));
+    if (peers.length) {
+      const group = [contact, ...peers].filter((candidate, index, all) => all.findIndex((item) => item.id === candidate.id) === index);
+      group.forEach((candidate) => used.add(candidate.id));
+      groups.push(group);
+    }
+  }
+  return groups;
+}
+
+async function mergeDuplicateContacts(): Promise<void> {
+  const groups = duplicateGroups();
+  if (!groups.length) {
+    notice = "Keine zusammenführbaren Dubletten gefunden.";
+    render();
+    return;
+  }
+  if (!window.confirm(`${groups.length} Dublettengruppe(n) zusammenführen? Je Gruppe bleibt ein gemeinsamer CardDAV-Kontakt mit allen eindeutigen Rufnummern erhalten.`)) return;
+  try {
+    for (const group of groups) {
+      const primary = [...group].sort((a, b) => Number(Boolean(b.espoId)) - Number(Boolean(a.espoId)) || Number(b.source === "carddav") - Number(a.source === "carddav"))[0];
+      const seenNumbers = new Set<string>();
+      const phones = group.flatMap((contact) => contact.phones).filter((phone) => {
+        const key = phone.normalized || normalizePhoneNumber(phone.raw) || phone.raw;
+        if (seenNumbers.has(key)) return false;
+        seenNumbers.add(key);
+        return true;
+      }).map((phone, index) => ({ ...phone, primary: index === 0 }));
+      let merged: Contact = {
+        ...primary,
+        displayName: primary.displayName || group.find((contact) => contact.displayName)?.displayName || "Kontakt",
+        organization: primary.organization || group.find((contact) => contact.organization)?.organization,
+        email: primary.email || group.find((contact) => contact.email)?.email,
+        espoId: primary.espoId || group.find((contact) => contact.espoId)?.espoId,
+        favorite: group.some((contact) => contact.favorite),
+        phones
+      };
+      if (isTauriRuntime()) merged = await writeCardDavContactNative(settings, merged, cardDavPassword);
+      for (const duplicate of group.filter((contact) => contact.id !== primary.id && contact.source === "carddav")) {
+        if (isTauriRuntime()) await deleteCardDavContactNative(settings, duplicate, cardDavPassword);
+      }
+      const ids = new Set(group.map((contact) => contact.id));
+      contacts = [...contacts.filter((contact) => !ids.has(contact.id)), merged];
+    }
+    persistContacts();
+    notice = `${groups.length} Dublettengruppe(n) wurden zusammengeführt.`;
+  } catch (error) {
+    notice = errorMessage(error, "Dubletten konnten nicht vollständig zusammengeführt werden");
+  }
+  render();
+}
+
 function persistContacts(): void {
   saveContacts(contacts);
   saveFavoriteIds(contacts.filter((contact) => contact.favorite).map((contact) => contact.id));
@@ -505,7 +594,8 @@ function addHistory(direction: CallEntry["direction"], number: string, name = nu
       name,
       number,
       time: new Intl.DateTimeFormat("de-DE", { dateStyle: "short", timeStyle: "short" }).format(new Date()),
-      result
+      result,
+      callbackRequested: direction === "missed"
     },
     ...callHistory
   ].slice(0, 100);
@@ -859,6 +949,8 @@ function handleKeyboardShortcut(event: KeyboardEvent): void {
   }
   if (!editing && event.key === "Enter" && state.callState === "idle" && state.activeNumber) void dial();
   if (!editing && event.key.toLowerCase() === "m" && ["active", "held"].includes(state.callState)) void toggleMute();
+  if (!editing && event.key.toLowerCase() === "h" && ["active", "held"].includes(state.callState)) void holdCall();
+  if (!editing && event.key === "Escape" && state.callState !== "idle") void hangup();
 }
 
 function toggleFavorite(contactId: string): void {
@@ -971,7 +1063,7 @@ async function importVCards(file: File): Promise<void> {
 }
 
 function renderContact(contact: Contact): string {
-  const primaryPhone = contact.phones[0];
+  const primaryPhone = contact.phones.find((phone) => phone.primary) || contact.phones[0];
   const initials = contact.displayName.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase();
   const details = [contact.organization, contact.email].filter(Boolean).join(" · ") || contact.source || "Kontakt";
   const extraCount = Math.max(0, contact.phones.length - 1);
@@ -997,21 +1089,43 @@ function renderContact(contact: Contact): string {
   `;
 }
 
+function renderAlphabeticalContacts(items: Contact[]): string {
+  const sorted = sortedContacts(items);
+  const letters = [...new Set(sorted.map(contactLetter))];
+  if (!sorted.length) return '<div class="empty large">Keine Treffer</div>';
+  return `<div class="contact-directory"><div class="contact-list grouped-contact-list">
+    ${letters.map((letter) => `<section class="contact-group" id="contacts-${letter === "#" ? "other" : letter}"><h2>${letter}</h2>${sorted.filter((contact) => contactLetter(contact) === letter).map(renderContact).join("")}</section>`).join("")}
+  </div><nav class="alphabet-rail" aria-label="Alphabetische Schnellnavigation">${letters.map((letter) => `<button type="button" data-letter="${letter === "#" ? "other" : letter}">${letter}</button>`).join("")}</nav></div>`;
+}
+
+function renderCompanyContacts(items: Contact[]): string {
+  const companies = new Map<string, Contact[]>();
+  for (const contact of sortedContacts(items)) {
+    const company = contact.organization?.trim() || "Ohne Firma";
+    companies.set(company, [...(companies.get(company) || []), contact]);
+  }
+  return `<div class="contact-list company-list">${[...companies.entries()].sort(([a], [b]) => a.localeCompare(b, "de")).map(([company, members]) => {
+    const open = expandedCompanies.has(company);
+    return `<section class="company-group"><button type="button" class="company-toggle" data-company="${escapeHtml(company)}"><span>${open ? "▾" : "▸"}</span><strong>${escapeHtml(company)}</strong><small>${members.length} ${members.length === 1 ? "Kontakt" : "Kontakte"}</small></button>${open ? members.map(renderContact).join("") : ""}</section>`;
+  }).join("") || '<div class="empty large">Keine Treffer</div>'}</div>`;
+}
+
 function renderHistoryList(emptyText: string): string {
-  const entries = callHistory.filter((entry) => historyFilter === "all" || entry.direction === historyFilter)
+  const entries = [...callHistory].filter((entry) => historyFilter === "all" || entry.direction === historyFilter)
     .filter((entry) => `${entry.name} ${entry.number}`.toLowerCase().includes(historyQuery.toLowerCase()));
+  entries.sort((a, b) => Number(Boolean(b.callbackRequested)) - Number(Boolean(a.callbackRequested)));
   if (entries.length === 0) return `<div class="empty large">${emptyText}</div>`;
   return `
     <div class="contact-list">
       ${entries.map((entry) => `
-        <div class="history-entry"><button class="history-row" data-number="${escapeHtml(entry.number)}">
+        <div class="history-entry ${entry.callbackRequested ? "callback-open" : ""}"><button class="history-row" data-number="${escapeHtml(entry.number)}">
           <span class="history-icon">${entry.direction === "missed" ? "!" : entry.direction === "inbound" ? "↓" : "↑"}</span>
           <span class="history-main">
             <strong>${escapeHtml(entry.name)}</strong>
             <small>${escapeHtml(entry.number)}</small>
           </span>
           <small class="history-meta">${escapeHtml(callResultText(entry.result))}${entry.durationSeconds !== undefined ? ` · ${formatDuration(entry.durationSeconds)}` : ""} · ${escapeHtml(entry.time)}</small>
-        </button><div class="history-actions"><button class="history-callback ${entry.callbackRequested ? "active" : ""}" data-callback-id="${escapeHtml(entry.id)}">${entry.callbackRequested ? "Rückruf erledigt" : "Rückruf markieren"}</button><button class="history-callback" data-note-id="${escapeHtml(entry.id)}">${entry.note ? "Notiz bearbeiten" : "Notiz"}</button><button class="history-callback" data-assign-id="${escapeHtml(entry.id)}">Kontakt zuordnen</button></div>${entry.note ? `<p class="history-note">${escapeHtml(entry.note)}</p>` : ""}</div>
+        </button><div class="history-actions"><button class="history-callback ${entry.callbackRequested ? "active" : ""}" data-callback-id="${escapeHtml(entry.id)}">${entry.callbackRequested ? "Als erledigt markieren" : "Rückruf öffnen"}</button><button class="history-callback" data-note-id="${escapeHtml(entry.id)}">${entry.note ? "Notiz bearbeiten" : "Notiz"}</button><button class="history-callback" data-assign-id="${escapeHtml(entry.id)}">Kontakt zuordnen</button></div>${entry.note ? `<p class="history-note">${escapeHtml(entry.note)}</p>` : ""}</div>
       `).join("")}
     </div>
   `;
@@ -1077,7 +1191,12 @@ function renderMainPanel(visibleContacts: Contact[]): string {
   }
 
   if (activeView === "favorites") {
-    const favorites = visibleContacts.filter((contact) => contact.favorite);
+    const frequentIds = frequentContactIds();
+    const favorites = sortedContacts(visibleContacts.filter((contact) => contact.favorite));
+    const frequent = frequentIds
+      .map((id) => visibleContacts.find((contact) => contact.id === id))
+      .filter((contact): contact is Contact => Boolean(contact))
+      .filter((contact) => !contact.favorite);
     return `
       <section class="contacts-panel">
         <div class="panel-header">
@@ -1087,9 +1206,7 @@ function renderMainPanel(visibleContacts: Contact[]): string {
           </div>
         </div>
         <input class="search" id="search" placeholder="Favoriten suchen" value="${escapeHtml(query)}" />
-        <div class="contact-list">
-          ${favorites.map(renderContact).join("") || '<div class="empty large">Noch keine Favoriten markiert.</div>'}
-        </div>
+        <div class="contact-list">${favorites.length ? `<h2>Favoriten</h2>${favorites.map(renderContact).join("")}` : ""}${frequent.length ? `<h2 class="list-subheading">Häufig angerufen</h2>${frequent.map(renderContact).join("")}` : ""}${!favorites.length && !frequent.length ? '<div class="empty large">Noch keine Favoriten oder häufigen Kontakte vorhanden.</div>' : ""}</div>
       </section>
     `;
   }
@@ -1153,10 +1270,8 @@ function renderMainPanel(visibleContacts: Contact[]): string {
         </div>
         <button class="sync-button" id="new-contact">+ Kontakt</button>
       </div>
-      <input class="search" id="search" placeholder="Name, Firma oder Nummer suchen" value="${escapeHtml(query)}" />
-      <div class="contact-list">
-        ${visibleContacts.map(renderContact).join("") || '<div class="empty large">Keine Treffer</div>'}
-      </div>
+      <div class="directory-toolbar"><input class="search" id="search" placeholder="Name, Firma oder Nummer suchen" value="${escapeHtml(query)}" /><div class="layout-switch"><button type="button" data-layout="alphabetical" class="${contactLayout === "alphabetical" ? "active" : ""}">A–Z</button><button type="button" data-layout="companies" class="${contactLayout === "companies" ? "active" : ""}">Firmen</button></div></div>
+      ${contactLayout === "alphabetical" ? renderAlphabeticalContacts(visibleContacts) : renderCompanyContacts(visibleContacts)}
     </section>
   `;
 }
@@ -1194,6 +1309,7 @@ function renderSettingsModal(): string {
         <h2>App-Verhalten</h2>
         <label class="check-row"><input type="checkbox" name="launchAtStartup" ${settings.launchAtStartup ? "checked" : ""} /><span>Softphone automatisch mit Windows starten</span></label>
         <label class="check-row"><input type="checkbox" name="closeToTray" ${settings.closeToTray ? "checked" : ""} /><span>Beim Schließen im Infobereich weiterlaufen</span></label>
+        <label class="check-row"><input type="checkbox" name="compactMode" ${settings.compactMode ? "checked" : ""} /><span>Kompaktmodus für kleine Fenster</span></label>
         <label><span>CardDAV URL</span><input name="cardDavUrl" value="${escapeHtml(settings.cardDavUrl)}" /></label>
         <label><span>CardDAV Benutzer</span><input name="cardDavUser" value="${escapeHtml(settings.cardDavUser)}" /></label>
         <label><span>CardDAV Passwort ${isTauriRuntime() && hasStoredCardDavPassword ? "(gespeichert)" : ""}</span><input name="cardDavPassword" type="password" value="${escapeHtml(cardDavPassword)}" autocomplete="off" /></label>
@@ -1214,8 +1330,10 @@ function renderSettingsModal(): string {
       <h2>Kontakte</h2>
       <div class="contact-settings-actions">
         <button class="secondary" id="sync-carddav" ${syncState === "syncing" ? "disabled" : ""}>${syncState === "syncing" ? "Kontakte werden aktualisiert …" : "CardDAV jetzt aktualisieren"}</button>
+        <button class="secondary" id="merge-duplicates" ${duplicateGroups().length ? "" : "disabled"}>Dubletten zusammenführen</button>
         <label class="file-button">vCard-Datei importieren<input id="vcard-import" type="file" accept=".vcf,text/vcard,text/x-vcard" /></label>
       </div>
+      <p class="settings-status">Dublettenprüfung: ${duplicateGroups().length ? `${duplicateGroups().length} mögliche Dublettengruppe(n) erkannt. Gleiche Rufnummern oder E-Mail-Adressen bitte vor dem Löschen im CRM prüfen.` : "Keine Dubletten anhand identischer Rufnummern oder E-Mail-Adressen erkannt."}</p>
       <p class="settings-status">${syncState === "syncing"
         ? "CardDAV wird gerade aktualisiert …"
         : lastCardDavSyncAt
@@ -1243,14 +1361,14 @@ function render(): void {
   const incomingInitials = incomingName.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase() || "?";
 
   root.innerHTML = `
-    <section class="shell">
+    <section class="shell ${settings.compactMode ? "compact-mode" : ""}">
       <header class="topbar">
         <div class="brand">
           <img class="brand-logo" src="${brandLogoUrl}" alt="NIVAKO Softphone – VoIP Client" />
         </div>
         <nav class="nav">
           ${navButton("contacts", "Kontakte")}
-          ${navButton("history", "Verlauf")}
+          ${navButton("history", `Verlauf${callHistory.filter((entry) => entry.direction === "missed" && entry.callbackRequested).length ? ` (${callHistory.filter((entry) => entry.direction === "missed" && entry.callbackRequested).length})` : ""}`)}
           ${navButton("favorites", "Favoriten")}
         </nav>
         <div class="topbar-actions">
@@ -1269,6 +1387,7 @@ function render(): void {
             <strong>${escapeHtml(state.activeContact?.displayName || state.remoteIdentity || state.activeNumber || "Nummer wählen")}</strong>
             <small>${escapeHtml(state.activeContact?.organization || state.activeNumber || "Nummer eingeben oder Kontakt auswählen")}</small>
           </div>
+          ${state.callState !== "idle" ? `<div class="live-call-status"><span id="live-call-duration">${formatDuration(callStartedAt ? Math.round((Date.now() - callStartedAt) / 1000) : 0)}</span><span>${state.muted ? "Mikrofon stumm" : "Mikrofon aktiv"}</span><span>${escapeHtml(canUseNativeTelephony() ? "liblinphone" : settings.enableWebRtcSip ? "WebRTC-SIP" : "Telefonhandler")}</span></div>` : ""}
           <input class="number-input" id="number-input" value="${escapeHtml(state.activeNumber)}" placeholder="+49..." />
           <div class="keypad">
             ${keypad.map((digit) => `<button data-digit="${digit}">${digit}</button>`).join("")}
@@ -1306,6 +1425,11 @@ function render(): void {
   `;
 
   bindEvents();
+  if (callClockTimer !== undefined) window.clearInterval(callClockTimer);
+  callClockTimer = state.callState === "active" || state.callState === "held" ? window.setInterval(() => {
+    const clock = document.querySelector<HTMLElement>("#live-call-duration");
+    if (clock) clock.textContent = formatDuration(callStartedAt ? Math.round((Date.now() - callStartedAt) / 1000) : 0);
+  }, 1000) : undefined;
   if (previousContactScroll !== undefined) {
     const list = document.querySelector<HTMLElement>(".contact-list");
     if (list) list.scrollTop = previousContactScroll;
@@ -1402,6 +1526,18 @@ function bindEvents(): void {
       render();
     });
   });
+  document.querySelectorAll<HTMLButtonElement>("[data-layout]").forEach((button) => button.addEventListener("click", () => {
+    contactLayout = button.dataset.layout as typeof contactLayout;
+    render();
+  }));
+  document.querySelectorAll<HTMLButtonElement>("[data-letter]").forEach((button) => button.addEventListener("click", () => {
+    document.querySelector<HTMLElement>(`#contacts-${button.dataset.letter}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }));
+  document.querySelectorAll<HTMLButtonElement>("[data-company]").forEach((button) => button.addEventListener("click", () => {
+    const company = button.dataset.company || "";
+    if (expandedCompanies.has(company)) expandedCompanies.delete(company); else expandedCompanies.add(company);
+    render();
+  }));
   document.querySelector<HTMLButtonElement>("#open-settings")?.addEventListener("click", () => {
     settingsOpen = true;
     render();
@@ -1511,6 +1647,7 @@ function bindEvents(): void {
   });
   document.querySelector<HTMLButtonElement>("#backspace")?.addEventListener("click", deleteDigit);
   document.querySelector<HTMLButtonElement>("#sync-carddav")?.addEventListener("click", () => void syncCardDav());
+  document.querySelector<HTMLButtonElement>("#merge-duplicates")?.addEventListener("click", () => void mergeDuplicateContacts());
   document.querySelector<HTMLButtonElement>("#refresh-audio")?.addEventListener("click", () => void refreshAudioDevices(true));
   document.querySelector<HTMLButtonElement>("#test-speaker")?.addEventListener("click", () => void testSpeaker());
   document.querySelector<HTMLButtonElement>("#test-microphone")?.addEventListener("click", () => void testMicrophone());
@@ -1574,6 +1711,7 @@ function bindEvents(): void {
       launchAtStartup: form.get("launchAtStartup") === "on",
       doNotDisturb: settings.doNotDisturb,
       closeToTray: form.get("closeToTray") === "on",
+      compactMode: form.get("compactMode") === "on",
       speakerVolume: settings.speakerVolume,
       microphoneVolume: settings.microphoneVolume,
       ringtone: settings.ringtone

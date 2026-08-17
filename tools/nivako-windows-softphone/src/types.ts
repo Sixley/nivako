@@ -61,6 +61,7 @@ export interface Settings {
   speakerVolume: number;
   microphoneVolume: number;
   ringtone: "standard" | "soft" | "bright" | "silent";
+  compactMode: boolean;
 }
 
 export interface NativeSipStatus {
