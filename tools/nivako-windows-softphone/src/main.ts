@@ -129,11 +129,13 @@ let dndRejecting = false;
 let incomingCallRecorded = false;
 let editingHistoryId: string | null = null;
 let assigningHistoryId: string | null = null;
+let historyAssignmentQuery = "";
 let microphoneRecordingUrl = "";
 let ringtoneTimer: number | undefined;
 let contactLayout: "alphabetical" | "companies" = "alphabetical";
 let expandedCompanies = new Set<string>();
 let callClockTimer: number | undefined;
+let closeSettingsAfterSave = false;
 
 function stopRingtone(): void {
   if (ringtoneTimer !== undefined) window.clearInterval(ringtoneTimer);
@@ -942,8 +944,11 @@ function handleKeyboardShortcut(event: KeyboardEvent): void {
     return;
   }
   if (event.key === "Escape") {
-    settingsOpen = false; callAction = null; phonePicker = null; contactMenu = null;
-    if (editingContactId) closeContactOverlays();
+    if (assigningHistoryId) { assigningHistoryId = null; historyAssignmentQuery = ""; render(); return; }
+    if (editingHistoryId) { void requestFormClose("#history-note-form", () => { editingHistoryId = null; render(); }); return; }
+    if (editingContactId) { void requestFormClose("#contact-editor-form", () => { closeContactOverlays(); render(); }); return; }
+    if (settingsOpen) { void requestSettingsClose(); return; }
+    callAction = null; phonePicker = null; contactMenu = null;
     render();
     return;
   }
@@ -951,6 +956,53 @@ function handleKeyboardShortcut(event: KeyboardEvent): void {
   if (!editing && event.key.toLowerCase() === "m" && ["active", "held"].includes(state.callState)) void toggleMute();
   if (!editing && event.key.toLowerCase() === "h" && ["active", "held"].includes(state.callState)) void holdCall();
   if (!editing && event.key === "Escape" && state.callState !== "idle") void hangup();
+}
+
+function formSignature(form: HTMLFormElement): string {
+  return JSON.stringify(Array.from(new FormData(form).entries()).map(([key, value]) => [key, String(value)]));
+}
+
+function markFormClean(form: HTMLFormElement | null): void {
+  if (form) form.dataset.initialSignature = formSignature(form);
+}
+
+function formIsDirty(form: HTMLFormElement | null): boolean {
+  return !!form && form.dataset.initialSignature !== formSignature(form);
+}
+
+function showUnsavedPrompt(onSave: () => void, onDiscard: () => void): void {
+  if (document.querySelector(".unsaved-prompt-backdrop")) return;
+  const prompt = document.createElement("div");
+  prompt.className = "unsaved-prompt-backdrop";
+  prompt.innerHTML = `<section class="unsaved-prompt" role="alertdialog" aria-modal="true" aria-labelledby="unsaved-title"><h2 id="unsaved-title">Änderungen speichern?</h2><p>Es gibt noch nicht gespeicherte Änderungen.</p><div class="modal-row"><button class="secondary" type="button" data-unsaved="cancel">Abbrechen</button><button class="secondary" type="button" data-unsaved="discard">Verwerfen</button><button class="primary" type="button" data-unsaved="save">Speichern</button></div></section>`;
+  document.querySelector(".shell")?.append(prompt);
+  prompt.querySelector<HTMLButtonElement>('[data-unsaved="cancel"]')?.addEventListener("click", () => prompt.remove());
+  prompt.querySelector<HTMLButtonElement>('[data-unsaved="discard"]')?.addEventListener("click", () => { prompt.remove(); onDiscard(); });
+  prompt.querySelector<HTMLButtonElement>('[data-unsaved="save"]')?.addEventListener("click", () => { prompt.remove(); onSave(); });
+  prompt.addEventListener("click", (event) => { if (event.target === prompt) prompt.remove(); });
+}
+
+async function requestFormClose(selector: string, onDiscard: () => void): Promise<void> {
+  const form = document.querySelector<HTMLFormElement>(selector);
+  if (!formIsDirty(form)) { onDiscard(); return; }
+  showUnsavedPrompt(() => form?.requestSubmit(), onDiscard);
+}
+
+async function requestSettingsClose(): Promise<void> {
+  const audioForm = document.querySelector<HTMLFormElement>("#audio-form");
+  const settingsForm = document.querySelector<HTMLFormElement>("#settings-form");
+  const dirtyAudio = formIsDirty(audioForm);
+  const dirtySettings = formIsDirty(settingsForm);
+  const discard = () => { settingsOpen = false; render(); };
+  if (!dirtyAudio && !dirtySettings) { discard(); return; }
+  showUnsavedPrompt(() => {
+    // Beide Formulare besitzen eigene Speicherwege. Das wichtigere Kontenformular
+    // wird zuletzt ausgelöst, weil dessen asynchroner Abschluss die Ansicht rendert.
+    closeSettingsAfterSave = true;
+    if (dirtyAudio) audioForm?.dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
+    if (dirtySettings) settingsForm?.requestSubmit();
+    else { closeSettingsAfterSave = false; settingsOpen = false; render(); }
+  }, discard);
 }
 
 function toggleFavorite(contactId: string): void {
@@ -1142,8 +1194,9 @@ function renderHistoryAssignmentModal(): string {
   if (!assigningHistoryId) return "";
   const entry = callHistory.find((candidate) => candidate.id === assigningHistoryId);
   if (!entry) return "";
-  const matches = searchContacts(contacts, entry.name === entry.number ? "" : entry.name).slice(0, 12);
-  return `<div class="settings-modal-backdrop"><section class="phone-picker" role="dialog" aria-modal="true"><header><div><h1>Nummer zuordnen</h1><p>${escapeHtml(entry.number)} einem Kontakt hinzufügen</p></div><button class="modal-close" id="close-history-assignment">×</button></header><div class="phone-picker-list">${matches.map((contact) => `<button type="button" data-assign-contact="${escapeHtml(contact.id)}"><span><strong>${escapeHtml(contact.displayName)}</strong><small>${escapeHtml(contact.organization || contact.email || "Kontakt")}</small></span><b>Hinzufügen</b></button>`).join("") || "<p>Keine Kontakte gefunden.</p>"}</div></section></div>`;
+  const initialQuery = entry.name === entry.number ? "" : entry.name;
+  const matches = searchContacts(contacts, historyAssignmentQuery || initialQuery);
+  return `<div class="settings-modal-backdrop history-assignment-backdrop"><section class="phone-picker history-assignment-modal" role="dialog" aria-modal="true" aria-labelledby="history-assignment-title"><header><div><h1 id="history-assignment-title">Nummer zuordnen</h1><p>${escapeHtml(entry.number)} einem Kontakt hinzufügen</p></div><button class="modal-close" id="close-history-assignment" aria-label="Schließen">×</button></header><div class="history-assignment-search"><input class="search" id="history-assignment-search" value="${escapeHtml(historyAssignmentQuery)}" placeholder="Kontakt oder Firma suchen" autofocus /></div><div class="phone-picker-list history-assignment-list">${matches.map((contact) => `<button type="button" data-assign-contact="${escapeHtml(contact.id)}"><span><strong>${escapeHtml(contact.displayName)}</strong><small>${escapeHtml(contact.organization || contact.email || "Kontakt")}</small></span><b>Hinzufügen</b></button>`).join("") || "<p>Keine Kontakte gefunden.</p>"}</div></section></div>`;
 }
 
 async function assignHistoryNumberToContact(contactId: string): Promise<void> {
@@ -1505,9 +1558,12 @@ function bindEvents(): void {
     render();
   });
 
-  const closeContactEditor = () => { closeContactOverlays(); render(); };
+  const closeContactEditor = () => void requestFormClose("#contact-editor-form", () => { closeContactOverlays(); render(); });
   document.querySelector<HTMLButtonElement>("#close-contact-editor")?.addEventListener("click", closeContactEditor);
   document.querySelector<HTMLButtonElement>("#cancel-contact-editor")?.addEventListener("click", closeContactEditor);
+  document.querySelector<HTMLDivElement>(".contact-editor-backdrop")?.addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) closeContactEditor();
+  });
   document.querySelector<HTMLFormElement>("#contact-editor-form")?.addEventListener("submit", (event) => {
     event.preventDefault();
     void saveContactEdit(event.currentTarget as HTMLFormElement);
@@ -1549,13 +1605,11 @@ function bindEvents(): void {
     render();
   });
   document.querySelector<HTMLButtonElement>("#close-settings")?.addEventListener("click", () => {
-    settingsOpen = false;
-    render();
+    void requestSettingsClose();
   });
-  document.querySelector<HTMLDivElement>(".settings-modal-backdrop")?.addEventListener("click", (event) => {
+  document.querySelector<HTMLDivElement>(".settings-modal-backdrop:not(.phone-picker-backdrop):not(.contact-editor-backdrop):not(.history-assignment-backdrop)")?.addEventListener("click", (event) => {
     if (event.target === event.currentTarget) {
-      settingsOpen = false;
-      render();
+      void requestSettingsClose();
     }
   });
   document.querySelector<HTMLButtonElement>("#overlay-accept")?.addEventListener("click", () => void dial());
@@ -1669,9 +1723,10 @@ function bindEvents(): void {
   }));
   document.querySelectorAll<HTMLButtonElement>("[data-assign-id]").forEach((button) => button.addEventListener("click", () => {
     assigningHistoryId = button.dataset.assignId || null;
+    historyAssignmentQuery = "";
     render();
   }));
-  const closeHistoryNote = () => { editingHistoryId = null; render(); };
+  const closeHistoryNote = () => void requestFormClose("#history-note-form", () => { editingHistoryId = null; render(); });
   document.querySelector<HTMLButtonElement>("#close-history-note")?.addEventListener("click", closeHistoryNote);
   document.querySelector<HTMLButtonElement>("#cancel-history-note")?.addEventListener("click", closeHistoryNote);
   document.querySelector<HTMLFormElement>("#history-note-form")?.addEventListener("submit", (event) => {
@@ -1683,7 +1738,16 @@ function bindEvents(): void {
     notice = "Gesprächsnotiz gespeichert.";
     render();
   });
-  document.querySelector<HTMLButtonElement>("#close-history-assignment")?.addEventListener("click", () => { assigningHistoryId = null; render(); });
+  const closeHistoryAssignment = () => { assigningHistoryId = null; historyAssignmentQuery = ""; render(); };
+  document.querySelector<HTMLButtonElement>("#close-history-assignment")?.addEventListener("click", closeHistoryAssignment);
+  document.querySelector<HTMLDivElement>(".history-assignment-backdrop")?.addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) closeHistoryAssignment();
+  });
+  document.querySelector<HTMLInputElement>("#history-assignment-search")?.addEventListener("input", (event) => {
+    const input = event.currentTarget as HTMLInputElement;
+    historyAssignmentQuery = input.value;
+    renderAndRestoreInput("#history-assignment-search", input.selectionStart, input.selectionEnd);
+  });
   document.querySelectorAll<HTMLButtonElement>("[data-assign-contact]").forEach((button) => button.addEventListener("click", () => void assignHistoryNumberToContact(button.dataset.assignContact || "")));
   document.querySelector<HTMLInputElement>("#vcard-import")?.addEventListener("change", (event) => {
     const file = (event.target as HTMLInputElement).files?.[0];
@@ -1736,6 +1800,10 @@ function bindEvents(): void {
       scheduleDesktopMaintenance();
       notice = `Einstellungen gespeichert, aber Passwort-Speicherung fehlgeschlagen: ${errorMessage(error, "Unbekannter Fehler")}. Das eingegebene Passwort bleibt fuer diese Sitzung nutzbar.`;
     }
+    if (closeSettingsAfterSave) {
+      closeSettingsAfterSave = false;
+      settingsOpen = false;
+    }
     render();
     })();
   });
@@ -1756,7 +1824,7 @@ function bindEvents(): void {
     }
     configureTelephony();
     notice = "Audio-Einstellungen gespeichert.";
-    render();
+    if (!closeSettingsAfterSave) render();
   });
   document.querySelector<HTMLInputElement>('input[name="speakerVolume"]')?.addEventListener("input", (event) => {
     const value = (event.currentTarget as HTMLInputElement).value;
@@ -1768,6 +1836,10 @@ function bindEvents(): void {
     const label = document.querySelector<HTMLElement>("#microphone-volume-label");
     if (label) label.textContent = `Mikrofonpegel (${value} %)`;
   });
+  markFormClean(document.querySelector<HTMLFormElement>("#settings-form"));
+  markFormClean(document.querySelector<HTMLFormElement>("#audio-form"));
+  markFormClean(document.querySelector<HTMLFormElement>("#contact-editor-form"));
+  markFormClean(document.querySelector<HTMLFormElement>("#history-note-form"));
 }
 
 async function boot(): Promise<void> {
