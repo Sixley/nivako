@@ -4,7 +4,7 @@ import { loadAudioDevices, type AudioDeviceState } from "./audioDevices";
 import { parseManyVCards } from "./carddav";
 import { normalizePhoneNumber } from "./phoneNumber";
 import { syncCardDavContacts } from "./contactsRepository";
-import { deleteCardDavContactNative, getSipStatusNative, hasSecretNative, isTauriRuntime, loadSecretNative, saveSecretNative, writeCardDavContactNative } from "./nativeBridge";
+import { deleteCardDavContactNative, getPresenceNative, getSipStatusNative, hasSecretNative, isTauriRuntime, saveSecretNative, setMiniModeNative, writeCardDavContactNative } from "./nativeBridge";
 import { canUseNativeTelephony, NativeTelephonyAdapter } from "./nativeTelephony";
 import { searchContacts } from "./search";
 import { loadContacts, loadFavoriteIds, loadHistory, loadSettings, saveContacts, saveFavoriteIds, saveHistory, saveSettings } from "./storage";
@@ -39,8 +39,14 @@ const defaultSettings: Settings = {
   closeToTray: true,
   speakerVolume: 85,
   microphoneVolume: 70,
-  ringtone: "standard"
-  ,compactMode: false
+  ringtone: "standard",
+  compactMode: false,
+  parkExtension: "700",
+  pickupCode: "*8",
+  speedDialNumbers: "102",
+  searchShortcut: "Ctrl+F",
+  dialShortcut: "Ctrl+Enter",
+  muteShortcut: "Ctrl+M"
 };
 
 let settings = loadSettings(defaultSettings);
@@ -94,7 +100,7 @@ let historyQuery = "";
 let historyFilter: "all" | CallEntry["direction"] = "all";
 let activeView: View = "contacts";
 let settingsOpen = false;
-let appVersion = "0.8.0";
+let appVersion = "0.9.0";
 let callAction: "transfer" | "second" | null = null;
 let callActionQuery = "";
 let hasSecondCall = false;
@@ -107,6 +113,7 @@ let editingContactDraft: Contact | null = null;
 let cardDavTimer: number | undefined;
 let sipReconnectTimer: number | undefined;
 let sipStatusTimer: number | undefined;
+let presenceTimer: number | undefined;
 let notice = isTauriRuntime()
   ? "Softphone bereit."
   : "Bereit. CardDAV kann synchronisiert werden; echte Anrufe bleiben blockiert, solange der Anrufschutz aktiv ist.";
@@ -136,6 +143,8 @@ let contactLayout: "alphabetical" | "companies" = "alphabetical";
 let expandedCompanies = new Set<string>();
 let callClockTimer: number | undefined;
 let closeSettingsAfterSave = false;
+let miniMode = false;
+let presenceStates: Record<string, string> = {};
 
 function stopRingtone(): void {
   if (ringtoneTimer !== undefined) window.clearInterval(ringtoneTimer);
@@ -470,9 +479,6 @@ function configureTelephony(): void {
 
 async function registerSip(): Promise<void> {
   try {
-    if (isTauriRuntime() && !sipPassword && hasStoredSipPassword) {
-      sipPassword = await loadSecretNative("NIVAKO Softphone SIP", settings.sipExtension) || "";
-    }
     configureTelephony();
     await telephony.register();
   } catch (error) {
@@ -936,13 +942,15 @@ async function recordMicrophoneSample(): Promise<void> {
 function handleKeyboardShortcut(event: KeyboardEvent): void {
   const target = event.target as HTMLElement | null;
   const editing = target?.matches("input, textarea, select") || target?.isContentEditable;
-  if (event.ctrlKey && event.key.toLowerCase() === "f") {
+  if (matchesShortcut(event, settings.searchShortcut)) {
     event.preventDefault();
     activeView = "contacts";
     render();
     document.querySelector<HTMLInputElement>("#search")?.focus();
     return;
   }
+  if (matchesShortcut(event, settings.dialShortcut) && state.callState === "idle" && state.activeNumber) { event.preventDefault(); void dial(); return; }
+  if (matchesShortcut(event, settings.muteShortcut) && ["active", "held"].includes(state.callState)) { event.preventDefault(); void toggleMute(); return; }
   if (event.key === "Escape") {
     if (assigningHistoryId) { assigningHistoryId = null; historyAssignmentQuery = ""; render(); return; }
     if (editingHistoryId) { void requestFormClose("#history-note-form", () => { editingHistoryId = null; render(); }); return; }
@@ -956,6 +964,61 @@ function handleKeyboardShortcut(event: KeyboardEvent): void {
   if (!editing && event.key.toLowerCase() === "m" && ["active", "held"].includes(state.callState)) void toggleMute();
   if (!editing && event.key.toLowerCase() === "h" && ["active", "held"].includes(state.callState)) void holdCall();
   if (!editing && event.key === "Escape" && state.callState !== "idle") void hangup();
+}
+
+function matchesShortcut(event: KeyboardEvent, shortcut: string): boolean {
+  const parts = shortcut.toLowerCase().split("+").map((part) => part.trim()).filter(Boolean);
+  const key = parts.at(-1);
+  return !!key && event.key.toLowerCase() === key
+    && event.ctrlKey === parts.includes("ctrl")
+    && event.altKey === parts.includes("alt")
+    && event.shiftKey === parts.includes("shift");
+}
+
+async function parkCall(): Promise<void> {
+  if (!telephony.transfer || !settings.parkExtension.trim()) return;
+  try {
+    await telephony.transfer(settings.parkExtension.trim());
+    notice = `Gespräch wurde auf ${settings.parkExtension.trim()} geparkt.`;
+  } catch (error) { notice = errorMessage(error, "Gespräch konnte nicht geparkt werden"); }
+  render();
+}
+
+function pickupCall(): void {
+  setActiveNumber(settings.pickupCode.trim());
+  void dial();
+}
+
+async function toggleMiniMode(): Promise<void> {
+  miniMode = !miniMode;
+  if (isTauriRuntime()) await setMiniModeNative(miniMode).catch((error) => { notice = errorMessage(error, "Mini-Modus konnte nicht umgeschaltet werden"); });
+  render();
+}
+
+function speedDials(): string[] {
+  return settings.speedDialNumbers.split(",").map((number) => number.trim()).filter(Boolean).slice(0, 8);
+}
+
+function speedDialLabel(number: string): string {
+  return contacts.find((contact) => contact.phones.some((phone) => phone.normalized === normalizePhoneNumber(number) || phone.raw === number))?.displayName || number;
+}
+
+function internalExtension(contact: Contact): string | undefined {
+  return contact.phones.map((phone) => phone.raw.trim()).find((number) => /^\d{2,5}$/.test(number));
+}
+
+function presenceLabel(extension?: string): string {
+  if (!extension) return "";
+  const labels: Record<string, string> = { online: "Frei", busy: "Besetzt", dnd: "Nicht stören", offline: "Offline", pending: "Prüfe …", unknown: "Unbekannt" };
+  return labels[presenceStates[extension] || "pending"];
+}
+
+async function refreshPresence(): Promise<void> {
+  if (!isTauriRuntime() || !state.registered) return;
+  const extensions = [...new Set(contacts.map(internalExtension).filter((value): value is string => !!value))];
+  if (!extensions.length) return;
+  presenceStates = await getPresenceNative(extensions).catch(() => presenceStates);
+  renderUnlessEditing();
 }
 
 function formSignature(form: HTMLFormElement): string {
@@ -1088,6 +1151,9 @@ function scheduleDesktopMaintenance(): void {
       .then(applyNativeSipSnapshot)
       .catch(() => undefined);
   }, sipStatusPollMs);
+  if (presenceTimer !== undefined) window.clearInterval(presenceTimer);
+  presenceTimer = window.setInterval(() => void refreshPresence(), 15000);
+  void refreshPresence();
 }
 
 async function saveEnteredSecrets(): Promise<void> {
@@ -1120,6 +1186,8 @@ function renderContact(contact: Contact): string {
   const details = [contact.organization, contact.email].filter(Boolean).join(" · ") || contact.source || "Kontakt";
   const extraCount = Math.max(0, contact.phones.length - 1);
   const primaryLabel = primaryPhone ? phoneLabelNames[primaryPhone.label] : "";
+  const extension = internalExtension(contact);
+  const presence = extension ? presenceStates[extension] || "pending" : "";
 
   return `
     <div class="contact-row">
@@ -1127,7 +1195,7 @@ function renderContact(contact: Contact): string {
         <button class="contact-select" data-number="${escapeHtml(primaryPhone?.normalized || "")}" data-contact="${escapeHtml(contact.id)}">
           <span class="avatar">${contact.photoUrl ? `<img src="${escapeHtml(contact.photoUrl)}" alt="" />` : escapeHtml(initials || "?")}</span>
           <span class="contact-main">
-            <strong>${escapeHtml(contact.displayName)}</strong>
+            <strong>${escapeHtml(contact.displayName)}${extension ? ` <span class="presence-badge ${escapeHtml(presence)}"><i></i>${escapeHtml(presenceLabel(extension))}</span>` : ""}</strong>
             <small>${escapeHtml(details)}</small>
           </span>
           <span class="contact-number">
@@ -1165,19 +1233,19 @@ function renderCompanyContacts(items: Contact[]): string {
 function renderHistoryList(emptyText: string): string {
   const entries = [...callHistory].filter((entry) => historyFilter === "all" || entry.direction === historyFilter)
     .filter((entry) => `${entry.name} ${entry.number}`.toLowerCase().includes(historyQuery.toLowerCase()));
-  entries.sort((a, b) => Number(Boolean(b.callbackRequested)) - Number(Boolean(a.callbackRequested)));
+  entries.sort((a, b) => Number(Boolean(b.callbackRequested)) - Number(Boolean(a.callbackRequested)) || String(a.callbackDueAt || "9999").localeCompare(String(b.callbackDueAt || "9999")));
   if (entries.length === 0) return `<div class="empty large">${emptyText}</div>`;
   return `
     <div class="contact-list">
       ${entries.map((entry) => `
-        <div class="history-entry ${entry.callbackRequested ? "callback-open" : ""}"><button class="history-row" data-number="${escapeHtml(entry.number)}">
+        <div class="history-entry ${entry.callbackRequested ? "callback-open" : ""} ${entry.callbackRequested && entry.callbackDueAt && new Date(entry.callbackDueAt).getTime() < Date.now() ? "callback-overdue" : ""}"><button class="history-row" data-number="${escapeHtml(entry.number)}">
           <span class="history-icon">${entry.direction === "missed" ? "!" : entry.direction === "inbound" ? "↓" : "↑"}</span>
           <span class="history-main">
             <strong>${escapeHtml(entry.name)}</strong>
             <small>${escapeHtml(entry.number)}</small>
           </span>
           <small class="history-meta">${escapeHtml(callResultText(entry.result))}${entry.durationSeconds !== undefined ? ` · ${formatDuration(entry.durationSeconds)}` : ""} · ${escapeHtml(entry.time)}</small>
-        </button><div class="history-actions"><button class="history-callback ${entry.callbackRequested ? "active" : ""}" data-callback-id="${escapeHtml(entry.id)}">${entry.callbackRequested ? "Als erledigt markieren" : "Rückruf öffnen"}</button><button class="history-callback" data-note-id="${escapeHtml(entry.id)}">${entry.note ? "Notiz bearbeiten" : "Notiz"}</button><button class="history-callback" data-assign-id="${escapeHtml(entry.id)}">Kontakt zuordnen</button></div>${entry.note ? `<p class="history-note">${escapeHtml(entry.note)}</p>` : ""}</div>
+        </button><div class="history-actions"><button class="history-callback ${entry.callbackRequested ? "active" : ""}" data-callback-id="${escapeHtml(entry.id)}">${entry.callbackRequested ? "Als erledigt markieren" : "Rückruf öffnen"}</button><button class="history-callback" data-note-id="${escapeHtml(entry.id)}">${entry.note ? "Notiz / Termin" : "Notiz / Termin"}</button><button class="history-callback" data-assign-id="${escapeHtml(entry.id)}">Kontakt zuordnen</button></div>${entry.callbackRequested && entry.callbackDueAt ? `<p class="callback-due">Rückruf ${new Date(entry.callbackDueAt).getTime() < Date.now() ? "überfällig" : "fällig"}: ${escapeHtml(new Date(entry.callbackDueAt).toLocaleString("de-DE"))}</p>` : ""}${entry.note ? `<p class="history-note">${escapeHtml(entry.note)}</p>` : ""}</div>
       `).join("")}
     </div>
   `;
@@ -1187,7 +1255,7 @@ function renderHistoryNoteModal(): string {
   if (!editingHistoryId) return "";
   const entry = callHistory.find((candidate) => candidate.id === editingHistoryId);
   if (!entry) return "";
-  return `<div class="settings-modal-backdrop"><section class="phone-picker" role="dialog" aria-modal="true"><header><div><h1>Gesprächsnotiz</h1><p>${escapeHtml(entry.name)} · ${escapeHtml(entry.number)}</p></div><button class="modal-close" id="close-history-note">×</button></header><form id="history-note-form" class="settings-list"><textarea name="note" rows="5" placeholder="Ergebnis oder nächste Schritte festhalten">${escapeHtml(entry.note || "")}</textarea><div class="modal-row"><button class="secondary" type="button" id="cancel-history-note">Abbrechen</button><button class="primary" type="submit">Notiz speichern</button></div></form></section></div>`;
+  return `<div class="settings-modal-backdrop"><section class="phone-picker" role="dialog" aria-modal="true"><header><div><h1>Gesprächsnotiz & Rückruf</h1><p>${escapeHtml(entry.name)} · ${escapeHtml(entry.number)}</p></div><button class="modal-close" id="close-history-note">×</button></header><form id="history-note-form" class="settings-list"><textarea name="note" rows="5" placeholder="Ergebnis oder nächste Schritte festhalten">${escapeHtml(entry.note || "")}</textarea><label><span>Rückruf fällig</span><input name="callbackDueAt" type="datetime-local" value="${escapeHtml(entry.callbackDueAt || "")}" /></label><div class="modal-row"><button class="secondary" type="button" id="cancel-history-note">Abbrechen</button><button class="primary" type="submit">Speichern</button></div></form></section></div>`;
 }
 
 function renderHistoryAssignmentModal(): string {
@@ -1363,6 +1431,13 @@ function renderSettingsModal(): string {
         <label class="check-row"><input type="checkbox" name="launchAtStartup" ${settings.launchAtStartup ? "checked" : ""} /><span>Softphone automatisch mit Windows starten</span></label>
         <label class="check-row"><input type="checkbox" name="closeToTray" ${settings.closeToTray ? "checked" : ""} /><span>Beim Schließen im Infobereich weiterlaufen</span></label>
         <label class="check-row"><input type="checkbox" name="compactMode" ${settings.compactMode ? "checked" : ""} /><span>Kompaktmodus für kleine Fenster</span></label>
+        <label><span>Parkposition / Park-Erweiterung</span><input name="parkExtension" value="${escapeHtml(settings.parkExtension)}" /></label>
+        <label><span>Übernahme-Code</span><input name="pickupCode" value="${escapeHtml(settings.pickupCode)}" /></label>
+        <label><span>Kurzwahlen (Komma-getrennt)</span><input name="speedDialNumbers" value="${escapeHtml(settings.speedDialNumbers)}" placeholder="102, 103, +495021..." /></label>
+        <h2>Tastenkürzel</h2>
+        <label><span>Suche</span><input name="searchShortcut" value="${escapeHtml(settings.searchShortcut)}" /></label>
+        <label><span>Anrufen</span><input name="dialShortcut" value="${escapeHtml(settings.dialShortcut)}" /></label>
+        <label><span>Stummschalten</span><input name="muteShortcut" value="${escapeHtml(settings.muteShortcut)}" /></label>
         <label><span>CardDAV URL</span><input name="cardDavUrl" value="${escapeHtml(settings.cardDavUrl)}" /></label>
         <label><span>CardDAV Benutzer</span><input name="cardDavUser" value="${escapeHtml(settings.cardDavUser)}" /></label>
         <label><span>CardDAV Passwort ${isTauriRuntime() && hasStoredCardDavPassword ? "(gespeichert)" : ""}</span><input name="cardDavPassword" type="password" value="${escapeHtml(cardDavPassword)}" autocomplete="off" /></label>
@@ -1414,7 +1489,7 @@ function render(): void {
   const incomingInitials = incomingName.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase() || "?";
 
   root.innerHTML = `
-    <section class="shell ${settings.compactMode ? "compact-mode" : ""}">
+    <section class="shell ${settings.compactMode ? "compact-mode" : ""} ${miniMode ? "mini-mode" : ""}">
       <header class="topbar">
         <div class="brand">
           <img class="brand-logo" src="${brandLogoUrl}" alt="NIVAKO Softphone – VoIP Client" />
@@ -1427,6 +1502,7 @@ function render(): void {
         <div class="topbar-actions">
           <span class="user-presence ${state.registered ? "online" : "offline"}"><i></i>${escapeHtml(settings.sipExtension)} · ${state.registered ? "Online" : "Offline"}</span>
           <button class="dnd-trigger ${settings.doNotDisturb ? "active" : ""}" id="toggle-dnd" title="Nicht stören" aria-pressed="${settings.doNotDisturb}">Nicht stören</button>
+          <button class="dnd-trigger ${miniMode ? "active" : ""}" id="toggle-mini" title="Mini-Anrufmodus">Mini</button>
           <button class="settings-trigger" id="open-settings" title="Einstellungen" aria-label="Einstellungen">⚙</button>
         </div>
       </header>
@@ -1442,6 +1518,7 @@ function render(): void {
           </div>
           ${state.callState !== "idle" ? `<div class="live-call-status"><span id="live-call-duration">${formatDuration(callStartedAt ? Math.round((Date.now() - callStartedAt) / 1000) : 0)}</span><span>${state.muted ? "Mikrofon stumm" : "Mikrofon aktiv"}</span><span>${escapeHtml(canUseNativeTelephony() ? "liblinphone" : settings.enableWebRtcSip ? "WebRTC-SIP" : "Telefonhandler")}</span></div>` : ""}
           <input class="number-input" id="number-input" value="${escapeHtml(state.activeNumber)}" placeholder="+49..." />
+          ${speedDials().length ? `<div class="speed-dials" aria-label="Kurzwahlen">${speedDials().map((number) => `<button class="secondary" type="button" data-speed-dial="${escapeHtml(number)}">${escapeHtml(speedDialLabel(number))}</button>`).join("")}</div>` : ""}
           <div class="keypad">
             ${keypad.map((digit) => `<button data-digit="${digit}">${digit}</button>`).join("")}
           </div>
@@ -1455,12 +1532,14 @@ function render(): void {
               <button class="secondary" id="hold">${state.callState === "held" ? "Fortsetzen" : "Halten"}</button>
               <button class="secondary" id="mute">${state.muted ? "Mikrofon an" : "Stumm"}</button>
               <button class="secondary" id="transfer" ${state.callState === "active" || state.callState === "held" ? "" : "disabled"}>Weiterleiten</button>
+              <button class="secondary" id="park-call" ${state.callState === "active" || state.callState === "held" ? "" : "disabled"}>Parken</button>
               <button class="secondary" id="second-call" ${state.callState === "active" ? "" : "disabled"}>Weiteres Gespräch</button>
               ${hasSecondCall ? '<button class="secondary active" id="switch-call">Gespräch wechseln</button>' : ""}
               ${hasSecondCall ? '<button class="secondary active" id="attended-transfer">Nach Rückfrage übergeben</button>' : ""}
               ${hasSecondCall ? '<button class="secondary active conference-action" id="conference">Konferenz starten</button>' : ""}
             `}
           </div>
+          ${state.callState === "idle" && settings.pickupCode ? `<button class="secondary pickup-action" id="pickup-call">Geparkten/Gruppenruf übernehmen (${escapeHtml(settings.pickupCode)})</button>` : ""}
           ${hasSecondCall ? `<div class="line-overview"><div class="line-card active"><small>Aktives Gespräch</small><strong>${escapeHtml(state.activeContact?.displayName || state.remoteIdentity || state.activeNumber)}</strong><span>${escapeHtml(state.activeNumber)}</span></div><div class="line-card held"><small>Gehaltenes Gespräch</small><strong>${escapeHtml(waitingCallName || "Zweite Leitung")}</strong><span>${escapeHtml(waitingCallNumber)}</span></div></div>` : ""}
         </div>
 
@@ -1604,6 +1683,13 @@ function bindEvents(): void {
     notice = settings.doNotDisturb ? "Nicht stören ist aktiv." : "Nicht stören ist aus.";
     render();
   });
+  document.querySelector<HTMLButtonElement>("#toggle-mini")?.addEventListener("click", () => void toggleMiniMode());
+  document.querySelector<HTMLButtonElement>("#park-call")?.addEventListener("click", () => void parkCall());
+  document.querySelector<HTMLButtonElement>("#pickup-call")?.addEventListener("click", pickupCall);
+  document.querySelectorAll<HTMLButtonElement>("[data-speed-dial]").forEach((button) => button.addEventListener("click", () => {
+    setActiveNumber(button.dataset.speedDial || "");
+    void dial();
+  }));
   document.querySelector<HTMLButtonElement>("#close-settings")?.addEventListener("click", () => {
     void requestSettingsClose();
   });
@@ -1732,7 +1818,8 @@ function bindEvents(): void {
   document.querySelector<HTMLFormElement>("#history-note-form")?.addEventListener("submit", (event) => {
     event.preventDefault();
     const note = String(new FormData(event.currentTarget as HTMLFormElement).get("note") || "").trim();
-    callHistory = callHistory.map((entry) => entry.id === editingHistoryId ? { ...entry, note: note || undefined } : entry);
+    const callbackDueAt = String(new FormData(event.currentTarget as HTMLFormElement).get("callbackDueAt") || "");
+    callHistory = callHistory.map((entry) => entry.id === editingHistoryId ? { ...entry, note: note || undefined, callbackDueAt: callbackDueAt || undefined, callbackRequested: callbackDueAt ? true : entry.callbackRequested } : entry);
     saveHistory(callHistory);
     editingHistoryId = null;
     notice = "Gesprächsnotiz gespeichert.";
@@ -1779,6 +1866,12 @@ function bindEvents(): void {
       speakerVolume: settings.speakerVolume,
       microphoneVolume: settings.microphoneVolume,
       ringtone: settings.ringtone
+      ,parkExtension: String(form.get("parkExtension") || defaultSettings.parkExtension)
+      ,pickupCode: String(form.get("pickupCode") || defaultSettings.pickupCode)
+      ,speedDialNumbers: String(form.get("speedDialNumbers") || "")
+      ,searchShortcut: String(form.get("searchShortcut") || defaultSettings.searchShortcut)
+      ,dialShortcut: String(form.get("dialShortcut") || defaultSettings.dialShortcut)
+      ,muteShortcut: String(form.get("muteShortcut") || defaultSettings.muteShortcut)
     };
     cardDavPassword = String(form.get("cardDavPassword") || "");
     sipPassword = String(form.get("sipPassword") || "");

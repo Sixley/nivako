@@ -1,7 +1,7 @@
 use base64::Engine;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -67,6 +67,7 @@ type LinphoneFactory = c_void;
 type MSFactory = c_void;
 type LinphoneCoreCbs = c_void;
 type LinphoneErrorInfo = c_void;
+type LinphoneFriend = c_void;
 
 #[repr(C)]
 struct BctbxList {
@@ -100,6 +101,12 @@ extern "C" {
     ) -> *mut LinphoneCore;
     fn linphone_core_start(core: *mut LinphoneCore) -> c_int;
     fn linphone_core_iterate(core: *mut LinphoneCore);
+    fn linphone_core_create_friend_with_address(core: *mut LinphoneCore, address: *const c_char) -> *mut LinphoneFriend;
+    fn linphone_core_add_friend(core: *mut LinphoneCore, friend: *mut LinphoneFriend) -> c_int;
+    fn linphone_friend_enable_subscribes(friend: *mut LinphoneFriend, enable: bool_t) -> c_int;
+    fn linphone_friend_set_inc_subscribe_policy(friend: *mut LinphoneFriend, policy: c_int) -> c_int;
+    fn linphone_friend_is_presence_received(friend: *const LinphoneFriend) -> bool_t;
+    fn linphone_friend_get_consolidated_presence(friend: *const LinphoneFriend) -> c_int;
     fn linphone_core_unref(core: *mut LinphoneCore);
     fn linphone_core_get_ms_factory(core: *mut LinphoneCore) -> *mut MSFactory;
     fn linphone_core_set_network_reachable(core: *mut LinphoneCore, reachable: bool_t);
@@ -263,6 +270,7 @@ struct LinphoneSession {
     waiting_call: *mut LinphoneCall,
     held: bool,
     muted: bool,
+    presence_friends: HashMap<String, *mut LinphoneFriend>,
 }
 
 unsafe impl Send for LinphoneSession {}
@@ -336,6 +344,7 @@ enum SipSidecarCommand {
         playback: i32,
         microphone: i32,
     },
+    Presence { extensions: Vec<String> },
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1285,17 +1294,6 @@ fn with_session<T>(
     action(session)
 }
 
-fn fallback_secret_path() -> Result<PathBuf, AppError> {
-    let base = std::env::var_os("APPDATA")
-        .or_else(|| std::env::var_os("LOCALAPPDATA"))
-        .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-        .ok_or_else(|| {
-            AppError::Message("App-Datenordner konnte nicht ermittelt werden".to_string())
-        })?;
-    Ok(base.join("NIVAKO Softphone").join("secrets-fallback.json"))
-}
-
 fn app_data_dir() -> Result<PathBuf, AppError> {
     let base = std::env::var_os("APPDATA")
         .or_else(|| std::env::var_os("LOCALAPPDATA"))
@@ -1338,63 +1336,15 @@ fn linphone_config_path() -> Result<CString, AppError> {
     cstring(&config, "liblinphone-Konfigurationspfad")
 }
 
-fn fallback_secret_key(service: &str, account: &str) -> String {
-    base64::engine::general_purpose::STANDARD.encode(format!("{service}\n{account}"))
-}
-
-fn read_fallback_secrets() -> Result<BTreeMap<String, String>, AppError> {
-    let path = fallback_secret_path()?;
-    if !path.exists() {
-        return Ok(BTreeMap::new());
+fn validate_secret_target(service: &str, account: &str) -> Result<(), AppError> {
+    let valid_service = matches!(service, CARDDAV_SERVICE | SIP_SERVICE);
+    let valid_account = !account.trim().is_empty()
+        && account.len() <= 128
+        && account.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_' | '@'));
+    if !valid_service || !valid_account {
+        return Err(AppError::Message("Unzulässiges Credential-Ziel".to_string()));
     }
-    let text = fs::read_to_string(path).map_err(|error| {
-        AppError::Message(format!(
-            "Fallback-Credentials konnten nicht gelesen werden: {error}"
-        ))
-    })?;
-    serde_json::from_str(&text)
-        .map_err(|error| AppError::Message(format!("Fallback-Credentials sind unlesbar: {error}")))
-}
-
-fn write_fallback_secret(service: &str, account: &str, password: &str) -> Result<(), AppError> {
-    let path = fallback_secret_path()?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            AppError::Message(format!(
-                "Fallback-Credential-Ordner konnte nicht erstellt werden: {error}"
-            ))
-        })?;
-    }
-    let mut secrets = read_fallback_secrets()?;
-    secrets.insert(
-        fallback_secret_key(service, account),
-        base64::engine::general_purpose::STANDARD.encode(password),
-    );
-    let text = serde_json::to_string_pretty(&secrets).map_err(|error| {
-        AppError::Message(format!(
-            "Fallback-Credentials konnten nicht serialisiert werden: {error}"
-        ))
-    })?;
-    fs::write(path, text).map_err(|error| {
-        AppError::Message(format!(
-            "Fallback-Credentials konnten nicht gespeichert werden: {error}"
-        ))
-    })
-}
-
-fn read_fallback_secret(service: &str, account: &str) -> Result<Option<String>, AppError> {
-    let secrets = read_fallback_secrets()?;
-    let Some(encoded) = secrets.get(&fallback_secret_key(service, account)) else {
-        return Ok(None);
-    };
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(encoded)
-        .map_err(|error| {
-            AppError::Message(format!("Fallback-Credential ist beschaedigt: {error}"))
-        })?;
-    String::from_utf8(bytes)
-        .map(Some)
-        .map_err(|error| AppError::Message(format!("Fallback-Credential ist kein UTF-8: {error}")))
+    Ok(())
 }
 
 fn keyring_secret(service: &str, account: &str) -> Result<Option<String>, AppError> {
@@ -1419,19 +1369,33 @@ fn stored_or_supplied_secret(
     account: &str,
     supplied: Option<String>,
 ) -> Result<String, AppError> {
+    validate_secret_target(service, account)?;
     if let Some(password) = supplied.filter(|value| !value.is_empty()) {
-        let _ = write_fallback_secret(service, account, &password);
         return Ok(password);
     }
     if let Some(password) = keyring_secret(service, account)? {
         return Ok(password);
     }
-    if let Some(password) = read_fallback_secret(service, account)? {
-        return Ok(password);
-    }
     Err(AppError::Message(format!(
         "Passwort fehlt fuer {service} / {account}. Bitte in den Einstellungen erneut eintragen und speichern."
     )))
+}
+
+fn validate_carddav_url(url: &str) -> Result<reqwest::Url, AppError> {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|error| AppError::Message(format!("Ungültige CardDAV-Adresse: {error}")))?;
+    if parsed.scheme() != "https" || parsed.host_str() != Some("threesix.de") {
+        return Err(AppError::Message("CardDAV ist ausschließlich per HTTPS über threesix.de erlaubt".to_string()));
+    }
+    Ok(parsed)
+}
+
+fn validate_sip_server(server: &str) -> Result<(), AppError> {
+    let host = normalize_domain(server);
+    if host != "pbx.nivako.de" {
+        return Err(AppError::Message("Als SIP-Ziel ist ausschließlich pbx.nivako.de erlaubt".to_string()));
+    }
+    Ok(())
 }
 
 fn carddav_query_body() -> &'static str {
@@ -1466,7 +1430,7 @@ fn carddav_candidate_urls(url: &str, username: &str) -> Vec<String> {
         ));
     }
 
-    if let Ok(parsed) = reqwest::Url::parse(&direct) {
+    if let Ok(parsed) = validate_carddav_url(&direct) {
         let origin = parsed.origin().ascii_serialization();
         for user in [username.to_string(), lower_user.clone()] {
             for book in ["nivako-crm", "contacts", "kontakte"] {
@@ -1517,19 +1481,23 @@ fn carddav_client_and_auth(
     let auth = base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::none())
         .user_agent("NIVAKO Softphone CardDAV")
         .build()?;
     Ok((client, auth))
 }
 
 fn resolve_carddav_resource_url(base: &str, href: &str) -> Result<String, AppError> {
-    if href.starts_with("http://") || href.starts_with("https://") {
-        return Ok(href.to_string());
+    let base_url = validate_carddav_url(base)?;
+    let resolved = if href.starts_with("http://") || href.starts_with("https://") {
+        validate_carddav_url(href)?
+    } else {
+        base_url.join(href).map_err(|error| AppError::Message(format!("Ungültiger CardDAV-Kontaktpfad: {error}")))?
+    };
+    if resolved.origin() != base_url.origin() {
+        return Err(AppError::Message("CardDAV-Weiterleitung auf einen fremden Host wurde blockiert".to_string()));
     }
-    let base_url = reqwest::Url::parse(base)
-        .map_err(|error| AppError::Message(format!("Ungültige CardDAV-Adresse: {error}")))?;
-    base_url.join(href).map(|url| url.to_string())
-        .map_err(|error| AppError::Message(format!("Ungültiger CardDAV-Kontaktpfad: {error}")))
+    Ok(resolved.to_string())
 }
 
 fn sip_register_linphone(
@@ -1669,6 +1637,7 @@ fn sip_register_linphone(
         waiting_call: ptr::null_mut(),
         held: false,
         muted: false,
+        presence_friends: HashMap::new(),
     };
 
     let mut guard = SIP_SESSION
@@ -1907,6 +1876,10 @@ fn sidecar_reply(command: SipSidecarCommand) -> SipSidecarReply {
             Ok(status) => SipSidecarReply::Status { status },
             Err(error) => SipSidecarReply::Error { message: error.to_string() },
         },
+        SipSidecarCommand::Presence { extensions } => match sip_presence(extensions) {
+            Ok(states) => SipSidecarReply::Status { status: NativeSipStatus { registered: true, message: serde_json::to_string(&states).unwrap_or_else(|_| "{}".to_string()) } },
+            Err(error) => SipSidecarReply::Error { message: error.to_string() },
+        },
     }
 }
 
@@ -1940,46 +1913,32 @@ pub fn run_sip_sidecar() {
 
 #[tauri::command]
 fn save_secret(service: String, account: String, password: String) -> Result<(), AppError> {
-    write_fallback_secret(&service, &account, &password)?;
+    validate_secret_target(&service, &account)?;
     match keyring::Entry::new(&service, &account) {
         Ok(entry) => {
             if let Err(error) = entry.set_password(&password) {
-                eprintln!("Windows Credential Manager konnte nicht speichern: {error}; App-Fallback wurde gespeichert");
-                return Ok(());
+                return Err(AppError::Message(format!("Windows Credential Manager konnte nicht speichern: {error}")));
             }
             match entry.get_password() {
                 Ok(stored) if stored == password => Ok(()),
                 Ok(_) => {
-                    eprintln!("Windows Credential Manager Rueckpruefung ist fehlgeschlagen; App-Fallback wurde gespeichert");
-                    Ok(())
+                    Err(AppError::Message("Windows Credential Manager Rückprüfung ist fehlgeschlagen".to_string()))
                 }
                 Err(error) => {
-                    eprintln!("Windows Credential Manager Rueckpruefung fehlgeschlagen: {error}; App-Fallback wurde gespeichert");
-                    Ok(())
+                    Err(AppError::Message(format!("Windows Credential Manager Rückprüfung fehlgeschlagen: {error}")))
                 }
             }
         }
         Err(error) => {
-            eprintln!("Windows Credential Manager nicht verfuegbar: {error}; App-Fallback wurde gespeichert");
-            Ok(())
+            Err(AppError::Message(format!("Windows Credential Manager nicht verfügbar: {error}")))
         }
     }
 }
 
 #[tauri::command]
 fn has_secret(service: String, account: String) -> Result<bool, AppError> {
-    if keyring_secret(&service, &account)?.is_some() {
-        return Ok(true);
-    }
-    Ok(read_fallback_secret(&service, &account)?.is_some())
-}
-
-#[tauri::command]
-fn get_secret(service: String, account: String) -> Result<Option<String>, AppError> {
-    if let Some(password) = keyring_secret(&service, &account)? {
-        return Ok(Some(password));
-    }
-    read_fallback_secret(&service, &account)
+    validate_secret_target(&service, &account)?;
+    Ok(keyring_secret(&service, &account)?.is_some())
 }
 
 #[tauri::command]
@@ -1988,6 +1947,7 @@ fn sync_carddav(
     username: String,
     password: Option<String>,
 ) -> Result<CardDavSyncResult, AppError> {
+    validate_carddav_url(&url)?;
     let (client, auth) = carddav_client_and_auth(&username, password)?;
 
     let candidates = carddav_candidate_urls(&url, &username);
@@ -2078,6 +2038,7 @@ fn sip_register(
     display_name: String,
     password: Option<String>,
 ) -> Result<NativeSipStatus, AppError> {
+    validate_sip_server(&sip_server)?;
     let password = stored_or_supplied_secret(SIP_SERVICE, &sip_extension, password)?;
     if !is_sip_sidecar_process() {
         return match sip_sidecar_call(SipSidecarCommand::Register {
@@ -2268,11 +2229,25 @@ fn sip_status() -> Result<NativeSipSnapshot, AppError> {
 }
 
 #[tauri::command]
+fn sip_presence_status(extensions: Vec<String>) -> Result<HashMap<String, String>, AppError> {
+    if !is_sip_sidecar_process() {
+        return match sip_sidecar_call(SipSidecarCommand::Presence { extensions })? {
+            SipSidecarReply::Status { status } => serde_json::from_str(&status.message)
+                .map_err(|error| AppError::Message(format!("Präsenz-Antwort ist unlesbar: {error}"))),
+            SipSidecarReply::Error { message } => Err(AppError::Message(message)),
+            _ => Err(AppError::Message("Unerwartete Präsenz-Antwort".to_string())),
+        };
+    }
+    sip_presence(extensions)
+}
+
+#[tauri::command]
 fn sip_dial(
     number: String,
     sip_server: String,
     sip_extension: String,
 ) -> Result<NativeSipStatus, AppError> {
+    validate_sip_server(&sip_server)?;
     if !is_sip_sidecar_process() {
         return match sip_sidecar_call(SipSidecarCommand::Dial {
             number,
@@ -2823,6 +2798,40 @@ fn sip_dtmf(digit: String) -> Result<NativeSipStatus, AppError> {
     })
 }
 
+fn sip_presence(extensions: Vec<String>) -> Result<HashMap<String, String>, AppError> {
+    with_session(|session| {
+        let domain = normalize_domain(&session.sip_server);
+        for extension in extensions.iter().filter(|value| !value.is_empty() && value.len() <= 8 && value.chars().all(|ch| ch.is_ascii_digit())) {
+            if session.presence_friends.contains_key(extension) { continue; }
+            let uri = cstring(&format!("sip:{extension}@{domain}"), "Präsenz-Adresse")?;
+            let friend = unsafe { linphone_core_create_friend_with_address(session.core, uri.as_ptr()) };
+            if friend.is_null() { continue; }
+            unsafe {
+                linphone_friend_enable_subscribes(friend, 1);
+                linphone_friend_set_inc_subscribe_policy(friend, 0);
+                linphone_core_add_friend(session.core, friend);
+            }
+            session.presence_friends.insert(extension.clone(), friend);
+        }
+        tick_core_for(session.core, 3, 80);
+        let mut states = HashMap::new();
+        for extension in extensions {
+            let state = match session.presence_friends.get(&extension) {
+                Some(friend) if unsafe { linphone_friend_is_presence_received(**friend) } != 0 => match unsafe { linphone_friend_get_consolidated_presence(**friend) } {
+                    0 => "online",
+                    1 => "busy",
+                    2 => "dnd",
+                    _ => "offline",
+                },
+                Some(_) => "pending",
+                None => "unknown",
+            };
+            states.insert(extension, state.to_string());
+        }
+        Ok(states)
+    })
+}
+
 #[tauri::command]
 fn show_incoming_window(
     app: tauri::AppHandle,
@@ -2898,6 +2907,16 @@ fn set_autostart(enabled: bool) -> Result<(), AppError> {
 }
 
 #[tauri::command]
+fn set_mini_mode(app: tauri::AppHandle, enabled: bool) -> Result<(), AppError> {
+    let window = app.get_webview_window("main")
+        .ok_or_else(|| AppError::Message("Hauptfenster wurde nicht gefunden".to_string()))?;
+    let size = if enabled { tauri::LogicalSize::new(390.0, 560.0) } else { tauri::LogicalSize::new(1360.0, 900.0) };
+    window.set_size(tauri::Size::Logical(size)).map_err(|error| AppError::Message(error.to_string()))?;
+    window.set_always_on_top(enabled).map_err(|error| AppError::Message(error.to_string()))?;
+    Ok(())
+}
+
+#[tauri::command]
 fn set_close_to_tray(enabled: bool) {
     CLOSE_TO_TRAY.store(enabled, Ordering::Relaxed);
 }
@@ -2951,12 +2970,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             save_secret,
             has_secret,
-            get_secret,
             sync_carddav,
             write_carddav_contact,
             delete_carddav_contact,
             sip_register,
             sip_status,
+            sip_presence_status,
             sip_dial,
             sip_accept,
             sip_reject,
@@ -2974,6 +2993,7 @@ pub fn run() {
             get_autostart,
             set_autostart,
             set_close_to_tray
+            ,set_mini_mode
         ])
         .run(tauri::generate_context!())
         .expect("error while running NIVAKO Softphone");
@@ -2982,6 +3002,22 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restricts_credential_targets() {
+        assert!(validate_secret_target(CARDDAV_SERVICE, "Nivako").is_ok());
+        assert!(validate_secret_target("arbitrary-service", "Nivako").is_err());
+        assert!(validate_secret_target(SIP_SERVICE, "../101").is_err());
+    }
+
+    #[test]
+    fn restricts_network_targets() {
+        assert!(validate_carddav_url("https://threesix.de/remote.php/dav/").is_ok());
+        assert!(validate_carddav_url("http://threesix.de/remote.php/dav/").is_err());
+        assert!(validate_carddav_url("https://evil.example/remote.php/dav/").is_err());
+        assert!(validate_sip_server("pbx.nivako.de;transport=tcp").is_ok());
+        assert!(validate_sip_server("attacker.example;transport=tcp").is_err());
+    }
 
     #[test]
     fn parses_digest_challenge_with_quoted_commas() {

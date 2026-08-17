@@ -29,6 +29,7 @@ export interface CallEntry {
   result?: "blocked" | "started" | "failed" | "completed";
   durationSeconds?: number;
   callbackRequested?: boolean;
+  callbackDueAt?: string;
   note?: string;
 }
 
@@ -62,6 +63,12 @@ export interface Settings {
   microphoneVolume: number;
   ringtone: "standard" | "soft" | "bright" | "silent";
   compactMode: boolean;
+  parkExtension: string;
+  pickupCode: string;
+  speedDialNumbers: string;
+  searchShortcut: string;
+  dialShortcut: string;
+  muteShortcut: string;
 }
 
 export interface NativeSipStatus {

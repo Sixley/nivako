@@ -79,10 +79,6 @@ export async function hasSecretNative(service: string, account: string): Promise
   return tauriInvoke<boolean>("has_secret", { service, account });
 }
 
-export async function loadSecretNative(service: string, account: string): Promise<string | null> {
-  return tauriInvoke<string | null>("get_secret", { service, account });
-}
-
 export async function registerSipNative(settings: Settings, password?: string): Promise<NativeSipStatus> {
   return tauriInvokeWithTimeout<NativeSipStatus>("sip_register", {
     sipServer: settings.sipServer,
@@ -95,6 +91,10 @@ export async function registerSipNative(settings: Settings, password?: string): 
 
 export async function getSipStatusNative(): Promise<NativeSipSnapshot> {
   return tauriInvokeWithTimeout<NativeSipSnapshot>("sip_status", undefined, 5000, "SIP-Status antwortet nicht innerhalb von 5 Sekunden.");
+}
+
+export async function getPresenceNative(extensions: string[]): Promise<Record<string, string>> {
+  return tauriInvokeWithTimeout<Record<string, string>>("sip_presence_status", { extensions }, 5000, "Präsenzabfrage antwortet nicht innerhalb von 5 Sekunden.");
 }
 
 export async function dialNative(number: string, settings: Settings): Promise<NativeSipStatus> {
@@ -143,4 +143,8 @@ export async function sendDtmfNative(digit: string): Promise<NativeSipStatus> {
 
 export async function transferNative(target: string): Promise<NativeSipStatus> {
   return tauriInvokeWithTimeout<NativeSipStatus>("sip_transfer", { target }, nativeSipTimeoutMs, "Weiterleitung antwortet nicht innerhalb von 15 Sekunden.");
+}
+
+export async function setMiniModeNative(enabled: boolean): Promise<void> {
+  await tauriInvoke<void>("set_mini_mode", { enabled });
 }

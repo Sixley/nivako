@@ -286,6 +286,9 @@ h2 small {
 .company-toggle small { color: var(--muted); }
 .list-subheading { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
 .history-entry.callback-open { border-left: 4px solid var(--brand); border-radius: 7px; background: #fffaf0; }
+.history-entry.callback-overdue { border-left-color: var(--bad); background: #fff1f2; }
+.callback-due { grid-column: 1 / -1; margin: 0 10px 6px 48px; color: #8b5d00; font-size: 12px; font-weight: 750; }
+.callback-overdue .callback-due { color: var(--bad); }
 .live-call-status { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin: -5px 0 10px; }
 .live-call-status span { border-radius: 999px; padding: 4px 8px; color: var(--muted); background: #eee9e1; font-size: 11px; }
 .compact-mode { grid-template-columns: minmax(410px, 1fr) 330px; grid-template-rows: 62px minmax(0,1fr); }
@@ -294,6 +297,16 @@ h2 small {
 .compact-mode .contact-row, .compact-mode .contact-select { min-height: 52px; }
 .compact-mode .contact-select { padding-block: 5px; }
 .compact-mode .keypad button { height: 44px; }
+.speed-dials { display: flex; flex-wrap: wrap; gap: 6px; }
+.speed-dials button { padding: 7px 10px; font-size: 12px; }
+.pickup-action { width: 100%; margin-top: 10px; }
+.mini-mode { display: block; min-width: 0; }
+.mini-mode .topbar { position: static; height: auto; padding: 8px 12px; }
+.mini-mode .brand, .mini-mode .nav, .mini-mode .user-presence, .mini-mode .dnd-trigger:not(#toggle-mini), .mini-mode .settings-trigger, .mini-mode .contacts-panel { display: none; }
+.mini-mode .topbar-actions { justify-content: flex-end; }
+.mini-mode .phone-panel { min-height: calc(100vh - 52px); padding: 12px; }
+.mini-mode .call-card { max-width: none; padding: 16px; }
+.mini-mode .keypad { display: none; }
 
 .contact-row {
   display: grid;
@@ -380,6 +393,11 @@ h2 small {
   font-size: 15px;
   line-height: 1.25;
 }
+.presence-badge { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; color: var(--muted); font-size: 10px; font-weight: 700; vertical-align: middle; }
+.presence-badge i { width: 7px; height: 7px; border-radius: 50%; background: #aaa39a; }
+.presence-badge.online i { background: var(--good); }
+.presence-badge.busy i { background: var(--bad); }
+.presence-badge.dnd i { background: var(--warn); }
 
 .contact-main small {
   font-size: 12px;
