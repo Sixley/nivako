@@ -114,6 +114,8 @@ let cardDavTimer: number | undefined;
 let sipReconnectTimer: number | undefined;
 let sipStatusTimer: number | undefined;
 let presenceTimer: number | undefined;
+let callbackReminderTimer: number | undefined;
+const remindedCallbackIds = new Set<string>();
 let notice = isTauriRuntime()
   ? "Softphone bereit."
   : "Bereit. CardDAV kann synchronisiert werden; echte Anrufe bleiben blockiert, solange der Anrufschutz aktiv ist.";
@@ -1018,6 +1020,14 @@ async function refreshPresence(): Promise<void> {
   const extensions = [...new Set(contacts.map(internalExtension).filter((value): value is string => !!value))];
   if (!extensions.length) return;
   presenceStates = await getPresenceNative(extensions).catch(() => presenceStates);
+  renderUnlessEditing();
+}
+
+function checkDueCallbacks(): void {
+  const due = callHistory.filter((entry) => entry.callbackRequested && entry.callbackDueAt && new Date(entry.callbackDueAt).getTime() <= Date.now() && !remindedCallbackIds.has(entry.id));
+  if (!due.length) return;
+  due.forEach((entry) => remindedCallbackIds.add(entry.id));
+  notice = due.length === 1 ? `Rückruf fällig: ${due[0].name}` : `${due.length} Rückrufe sind fällig.`;
   renderUnlessEditing();
 }
 
@@ -1954,6 +1964,9 @@ async function boot(): Promise<void> {
   await updateCredentialState();
   await refreshAudioDevices(false);
   scheduleDesktopMaintenance();
+  if (callbackReminderTimer !== undefined) window.clearInterval(callbackReminderTimer);
+  callbackReminderTimer = window.setInterval(checkDueCallbacks, 60000);
+  checkDueCallbacks();
   await startDesktopServices();
   if (isTauriRuntime()) {
     const api = await import("@tauri-apps/api/core");
