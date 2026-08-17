@@ -2817,7 +2817,7 @@ fn sip_presence(extensions: Vec<String>) -> Result<HashMap<String, String>, AppE
         let mut states = HashMap::new();
         for extension in extensions {
             let state = match session.presence_friends.get(&extension) {
-                Some(friend) if unsafe { linphone_friend_is_presence_received(**friend) } != 0 => match unsafe { linphone_friend_get_consolidated_presence(**friend) } {
+                Some(friend) if unsafe { linphone_friend_is_presence_received(*friend) } != 0 => match unsafe { linphone_friend_get_consolidated_presence(*friend) } {
                     0 => "online",
                     1 => "busy",
                     2 => "dnd",
