@@ -1,7 +1,7 @@
 use base64::Engine;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CStr, CString};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -1336,6 +1336,60 @@ fn linphone_config_path() -> Result<CString, AppError> {
     cstring(&config, "liblinphone-Konfigurationspfad")
 }
 
+fn fallback_secret_path() -> Result<PathBuf, AppError> {
+    let base = std::env::var_os("APPDATA")
+        .or_else(|| std::env::var_os("LOCALAPPDATA"))
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .ok_or_else(|| AppError::Message("App-Datenordner konnte nicht ermittelt werden".to_string()))?;
+    Ok(base.join("NIVAKO Softphone").join("secrets-fallback.json"))
+}
+
+fn fallback_secret_key(service: &str, account: &str) -> String {
+    base64::engine::general_purpose::STANDARD.encode(format!("{service}\n{account}"))
+}
+
+fn read_fallback_secrets() -> Result<BTreeMap<String, String>, AppError> {
+    let path = fallback_secret_path()?;
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let text = fs::read_to_string(path)
+        .map_err(|error| AppError::Message(format!("Fallback-Credentials konnten nicht gelesen werden: {error}")))?;
+    serde_json::from_str(&text)
+        .map_err(|error| AppError::Message(format!("Fallback-Credentials sind unlesbar: {error}")))
+}
+
+fn write_fallback_secret(service: &str, account: &str, password: &str) -> Result<(), AppError> {
+    let path = fallback_secret_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| AppError::Message(format!("Fallback-Credential-Ordner konnte nicht erstellt werden: {error}")))?;
+    }
+    let mut secrets = read_fallback_secrets()?;
+    secrets.insert(
+        fallback_secret_key(service, account),
+        base64::engine::general_purpose::STANDARD.encode(password),
+    );
+    let text = serde_json::to_string_pretty(&secrets)
+        .map_err(|error| AppError::Message(format!("Fallback-Credentials konnten nicht serialisiert werden: {error}")))?;
+    fs::write(path, text)
+        .map_err(|error| AppError::Message(format!("Fallback-Credentials konnten nicht gespeichert werden: {error}")))
+}
+
+fn read_fallback_secret(service: &str, account: &str) -> Result<Option<String>, AppError> {
+    let secrets = read_fallback_secrets()?;
+    let Some(encoded) = secrets.get(&fallback_secret_key(service, account)) else {
+        return Ok(None);
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|error| AppError::Message(format!("Fallback-Credential ist beschädigt: {error}")))?;
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|error| AppError::Message(format!("Fallback-Credential ist kein UTF-8: {error}")))
+}
+
 fn validate_secret_target(service: &str, account: &str) -> Result<(), AppError> {
     let valid_service = matches!(service, CARDDAV_SERVICE | SIP_SERVICE);
     let valid_account = !account.trim().is_empty()
@@ -1374,6 +1428,9 @@ fn stored_or_supplied_secret(
         return Ok(password);
     }
     if let Some(password) = keyring_secret(service, account)? {
+        return Ok(password);
+    }
+    if let Some(password) = read_fallback_secret(service, account)? {
         return Ok(password);
     }
     Err(AppError::Message(format!(
@@ -1914,23 +1971,28 @@ pub fn run_sip_sidecar() {
 #[tauri::command]
 fn save_secret(service: String, account: String, password: String) -> Result<(), AppError> {
     validate_secret_target(&service, &account)?;
+    write_fallback_secret(&service, &account, &password)?;
     match keyring::Entry::new(&service, &account) {
         Ok(entry) => {
             if let Err(error) = entry.set_password(&password) {
-                return Err(AppError::Message(format!("Windows Credential Manager konnte nicht speichern: {error}")));
+                eprintln!("Windows Credential Manager konnte nicht speichern: {error}; App-Fallback wurde gespeichert");
+                return Ok(());
             }
             match entry.get_password() {
                 Ok(stored) if stored == password => Ok(()),
                 Ok(_) => {
-                    Err(AppError::Message("Windows Credential Manager Rückprüfung ist fehlgeschlagen".to_string()))
+                    eprintln!("Windows Credential Manager Rückprüfung ist fehlgeschlagen; App-Fallback wurde gespeichert");
+                    Ok(())
                 }
                 Err(error) => {
-                    Err(AppError::Message(format!("Windows Credential Manager Rückprüfung fehlgeschlagen: {error}")))
+                    eprintln!("Windows Credential Manager Rückprüfung fehlgeschlagen: {error}; App-Fallback wurde gespeichert");
+                    Ok(())
                 }
             }
         }
         Err(error) => {
-            Err(AppError::Message(format!("Windows Credential Manager nicht verfügbar: {error}")))
+            eprintln!("Windows Credential Manager nicht verfügbar: {error}; App-Fallback wurde gespeichert");
+            Ok(())
         }
     }
 }
@@ -1938,7 +2000,10 @@ fn save_secret(service: String, account: String, password: String) -> Result<(),
 #[tauri::command]
 fn has_secret(service: String, account: String) -> Result<bool, AppError> {
     validate_secret_target(&service, &account)?;
-    Ok(keyring_secret(&service, &account)?.is_some())
+    if keyring_secret(&service, &account)?.is_some() {
+        return Ok(true);
+    }
+    Ok(read_fallback_secret(&service, &account)?.is_some())
 }
 
 #[tauri::command]
