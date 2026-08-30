@@ -4,8 +4,17 @@ const keys = {
   contacts: "nivako-softphone.contacts",
   history: "nivako-softphone.history",
   favorites: "nivako-softphone.favorites",
-  settings: "nivako-softphone.settings"
+  settings: "nivako-softphone.settings",
+  windowState: "nivako-softphone.window-state"
 };
+
+export interface WindowState {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  maximized: boolean;
+}
 
 function readJson<T>(key: string, fallback: T): T {
   const raw = localStorage.getItem(key);
@@ -51,4 +60,12 @@ export function loadSettings(defaults: Settings): Settings {
 
 export function saveSettings(settings: Settings): void {
   writeJson(keys.settings, settings);
+}
+
+export function loadWindowState(): WindowState | undefined {
+  return readJson<WindowState | undefined>(keys.windowState, undefined);
+}
+
+export function saveWindowState(state: WindowState): void {
+  writeJson(keys.windowState, state);
 }

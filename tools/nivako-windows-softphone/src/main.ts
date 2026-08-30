@@ -10,6 +10,7 @@ import { searchContacts } from "./search";
 import { loadContacts, loadFavoriteIds, loadHistory, loadSettings, saveContacts, saveFavoriteIds, saveHistory, saveSettings } from "./storage";
 import { SafeTelephonyAdapter, WebRtcSipAdapter, type TelephonyAdapter } from "./telephony";
 import type { CallEntry, Contact, ContactPhone, NativeSipSnapshot, PhoneLabel, Settings, SoftphoneState } from "./types";
+import { restoreAndTrackWindow } from "./windowState";
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("App root missing");
@@ -1946,6 +1947,7 @@ function bindEvents(): void {
 }
 
 async function boot(): Promise<void> {
+  await restoreAndTrackWindow().catch(() => undefined);
   if (isTauriRuntime()) {
     try {
       const appApi = await import("@tauri-apps/api/app");
