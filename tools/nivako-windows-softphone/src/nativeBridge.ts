@@ -85,12 +85,17 @@ export async function registerSipNative(settings: Settings, password?: string): 
     sipExtension: settings.sipExtension,
     sipAuthUser: settings.sipAuthUser || settings.sipExtension,
     displayName: settings.sipDisplayName,
+    ringtone: settings.ringtone,
     password: password || null
   }, nativeSipTimeoutMs, "SIP-Registrierung antwortet nicht innerhalb von 15 Sekunden.");
 }
 
 export async function getSipStatusNative(): Promise<NativeSipSnapshot> {
   return tauriInvokeWithTimeout<NativeSipSnapshot>("sip_status", undefined, 5000, "SIP-Status antwortet nicht innerhalb von 5 Sekunden.");
+}
+
+export async function setRingtoneNative(ringtone: Settings["ringtone"], preview = false): Promise<void> {
+  await tauriInvokeWithTimeout<NativeSipStatus>("sip_set_ringtone", { ringtone, preview }, 5000, "Klingelton konnte nicht übernommen werden.");
 }
 
 export async function getPresenceNative(extensions: string[]): Promise<Record<string, string>> {

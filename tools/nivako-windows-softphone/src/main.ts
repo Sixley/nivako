@@ -4,7 +4,7 @@ import { loadAudioDevices, type AudioDeviceState } from "./audioDevices";
 import { parseManyVCards } from "./carddav";
 import { normalizePhoneNumber } from "./phoneNumber";
 import { syncCardDavContacts } from "./contactsRepository";
-import { deleteCardDavContactNative, getPresenceNative, getSipStatusNative, hasSecretNative, isTauriRuntime, saveSecretNative, setMiniModeNative, writeCardDavContactNative } from "./nativeBridge";
+import { deleteCardDavContactNative, getPresenceNative, getSipStatusNative, hasSecretNative, isTauriRuntime, saveSecretNative, setMiniModeNative, setRingtoneNative, writeCardDavContactNative } from "./nativeBridge";
 import { canUseNativeTelephony, NativeTelephonyAdapter } from "./nativeTelephony";
 import { searchContacts } from "./search";
 import { loadContacts, loadFavoriteIds, loadHistory, loadSettings, saveContacts, saveFavoriteIds, saveHistory, saveSettings } from "./storage";
@@ -1436,7 +1436,7 @@ function renderSettingsModal(): string {
         <label><span>Lautsprecher</span><select name="selectedSpeakerId"><option value="">Systemstandard</option>${outputOptions}</select></label>
         <label><span id="speaker-volume-label">Lautstärke (${settings.speakerVolume} %)</span><input name="speakerVolume" type="range" min="0" max="100" value="${settings.speakerVolume}" /></label>
         <label><span id="microphone-volume-label">Mikrofonpegel (${settings.microphoneVolume} %)</span><input name="microphoneVolume" type="range" min="0" max="100" value="${settings.microphoneVolume}" /></label>
-        <label><span>Klingelton</span><select name="ringtone"><option value="standard" ${settings.ringtone === "standard" ? "selected" : ""}>NIVAKO Standard</option><option value="soft" ${settings.ringtone === "soft" ? "selected" : ""}>Sanft</option><option value="bright" ${settings.ringtone === "bright" ? "selected" : ""}>Klar</option><option value="silent" ${settings.ringtone === "silent" ? "selected" : ""}>Lautlos</option></select></label>
+        <label><span>Klingelton</span><select name="ringtone"><option value="standard" ${settings.ringtone === "standard" ? "selected" : ""}>Classic Bell</option><option value="soft" ${settings.ringtone === "soft" ? "selected" : ""}>Aurora</option><option value="bright" ${settings.ringtone === "bright" ? "selected" : ""}>Modern Pulse</option><option value="silent" ${settings.ringtone === "silent" ? "selected" : ""}>Lautlos</option></select></label>
         <div class="microphone-meter"><i id="microphone-test-level"></i></div><div class="modal-row"><button class="secondary" type="button" id="test-microphone">Pegel testen</button><button class="secondary" type="button" id="record-microphone">5-Sek.-Aufnahme</button>${microphoneRecordingUrl ? `<audio class="microphone-playback" controls src="${escapeHtml(microphoneRecordingUrl)}"></audio>` : ""}<button class="secondary" type="button" id="test-ringtone">Klingelton testen</button><button class="secondary" type="button" id="test-speaker">Testton</button><button class="secondary" type="button" id="refresh-audio">Geräte aktualisieren</button><button class="primary" type="submit">Audio speichern</button></div>
       </form>
       <h2>Konten</h2>
@@ -1806,7 +1806,10 @@ function bindEvents(): void {
   document.querySelector<HTMLButtonElement>("#test-speaker")?.addEventListener("click", () => void testSpeaker());
   document.querySelector<HTMLButtonElement>("#test-microphone")?.addEventListener("click", () => void testMicrophone());
   document.querySelector<HTMLButtonElement>("#record-microphone")?.addEventListener("click", () => void recordMicrophoneSample());
-  document.querySelector<HTMLButtonElement>("#test-ringtone")?.addEventListener("click", playRingtonePulse);
+  document.querySelector<HTMLButtonElement>("#test-ringtone")?.addEventListener("click", () => {
+    if (isTauriRuntime()) void setRingtoneNative(settings.ringtone, true).catch((error) => { notice = errorMessage(error, "Klingelton konnte nicht abgespielt werden"); render(); });
+    else playRingtonePulse();
+  });
   document.querySelector<HTMLButtonElement>("#clear-history")?.addEventListener("click", () => {
     callHistory = [];
     saveHistory(callHistory);
@@ -1927,7 +1930,10 @@ function bindEvents(): void {
     };
     saveSettings(settings);
     if (isTauriRuntime()) {
-      void import("@tauri-apps/api/core").then((api) => api.invoke("sip_set_audio_levels", { playback: settings.speakerVolume, microphone: settings.microphoneVolume }));
+      void Promise.all([
+        import("@tauri-apps/api/core").then((api) => api.invoke("sip_set_audio_levels", { playback: settings.speakerVolume, microphone: settings.microphoneVolume })),
+        setRingtoneNative(settings.ringtone)
+      ]).catch((error) => { notice = errorMessage(error, "Audio-Einstellungen konnten nicht vollständig übernommen werden"); render(); });
     }
     configureTelephony();
     notice = "Audio-Einstellungen gespeichert.";

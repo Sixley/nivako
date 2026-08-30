@@ -129,6 +129,8 @@ extern "C" {
     fn linphone_core_set_playback_device(core: *mut LinphoneCore, device: *const c_char) -> c_int;
     fn linphone_core_set_capture_device(core: *mut LinphoneCore, device: *const c_char) -> c_int;
     fn linphone_core_set_ringer_device(core: *mut LinphoneCore, device: *const c_char) -> c_int;
+    fn linphone_core_set_ring(core: *mut LinphoneCore, path: *const c_char);
+    fn linphone_core_play_local(core: *mut LinphoneCore, audiofile: *const c_char) -> c_int;
     fn linphone_core_set_media_device(core: *mut LinphoneCore, device: *const c_char) -> c_int;
     fn linphone_core_set_play_level(core: *mut LinphoneCore, level: c_int);
     fn linphone_core_set_rec_level(core: *mut LinphoneCore, level: c_int);
@@ -316,6 +318,7 @@ enum SipSidecarCommand {
         sip_extension: String,
         sip_auth_user: String,
         display_name: String,
+        ringtone: String,
         password: String,
     },
     Status,
@@ -344,6 +347,7 @@ enum SipSidecarCommand {
         playback: i32,
         microphone: i32,
     },
+    Ringtone { ringtone: String, preview: bool },
     Presence { extensions: Vec<String> },
 }
 
@@ -1557,11 +1561,32 @@ fn resolve_carddav_resource_url(base: &str, href: &str) -> Result<String, AppErr
     Ok(resolved.to_string())
 }
 
+fn ringtone_path(ringtone: &str) -> Result<Option<CString>, AppError> {
+    if ringtone == "silent" {
+        return Ok(None);
+    }
+    let filename = match ringtone {
+        "soft" => "nivako-aurora.wav",
+        "bright" => "nivako-pulse.wav",
+        _ => "nivako-classic.wav",
+    };
+    let executable = std::env::current_exe()
+        .map_err(|error| AppError::Message(format!("Programmverzeichnis konnte nicht ermittelt werden: {error}")))?;
+    let base = executable.parent()
+        .ok_or_else(|| AppError::Message("Programmverzeichnis fehlt".to_string()))?;
+    let path = base.join("ringtones").join(filename);
+    if !path.exists() {
+        return Err(AppError::Message(format!("Klingeltondatei fehlt: {}", path.display())));
+    }
+    cstring(&path.to_string_lossy(), "Klingeltonpfad").map(Some)
+}
+
 fn sip_register_linphone(
     sip_server: &str,
     sip_extension: &str,
     sip_auth_user: &str,
     display_name: &str,
+    ringtone: &str,
     password: &str,
 ) -> Result<NativeSipStatus, AppError> {
     let domain = normalize_domain(sip_server);
@@ -1590,7 +1615,12 @@ fn sip_register_linphone(
         ));
     }
     install_linphone_call_callbacks(core);
+    let ring_path = ringtone_path(ringtone)?;
     unsafe {
+        match ring_path.as_ref() {
+            Some(path) => linphone_core_set_ring(core, path.as_ptr()),
+            None => linphone_core_set_ring(core, ptr::null()),
+        }
         let transports = LinphoneSipTransports {
             udp_port: -1,
             tcp_port: -1,
@@ -1848,12 +1878,14 @@ fn sidecar_reply(command: SipSidecarCommand) -> SipSidecarReply {
             sip_extension,
             sip_auth_user,
             display_name,
+            ringtone,
             password,
         } => match sip_register_linphone(
             &sip_server,
             &sip_extension,
             &sip_auth_user,
             &display_name,
+            &ringtone,
             &password,
         ) {
             Ok(status) => SipSidecarReply::Status { status },
@@ -1930,6 +1962,10 @@ fn sidecar_reply(command: SipSidecarCommand) -> SipSidecarReply {
             Err(error) => SipSidecarReply::Error { message: error.to_string() },
         },
         SipSidecarCommand::AudioLevels { playback, microphone } => match sip_set_audio_levels(playback, microphone) {
+            Ok(status) => SipSidecarReply::Status { status },
+            Err(error) => SipSidecarReply::Error { message: error.to_string() },
+        },
+        SipSidecarCommand::Ringtone { ringtone, preview } => match sip_set_ringtone(ringtone, preview) {
             Ok(status) => SipSidecarReply::Status { status },
             Err(error) => SipSidecarReply::Error { message: error.to_string() },
         },
@@ -2101,6 +2137,7 @@ fn sip_register(
     sip_extension: String,
     sip_auth_user: String,
     display_name: String,
+    ringtone: String,
     password: Option<String>,
 ) -> Result<NativeSipStatus, AppError> {
     validate_sip_server(&sip_server)?;
@@ -2111,6 +2148,7 @@ fn sip_register(
             sip_extension: sip_extension.clone(),
             sip_auth_user: sip_auth_user.clone(),
             display_name: display_name.clone(),
+            ringtone: ringtone.clone(),
             password: password.clone(),
         }) {
             Ok(SipSidecarReply::Status { mut status }) => {
@@ -2220,6 +2258,7 @@ fn sip_register(
             &sip_extension,
             &sip_auth_user,
             &display_name,
+            &ringtone,
             &password,
         ) {
             Ok(status) => Ok(status),
@@ -2723,6 +2762,35 @@ fn sip_set_audio_levels(playback: i32, microphone: i32) -> Result<NativeSipStatu
 }
 
 #[tauri::command]
+fn sip_set_ringtone(ringtone: String, preview: bool) -> Result<NativeSipStatus, AppError> {
+    if !is_sip_sidecar_process() {
+        return match sip_sidecar_call(SipSidecarCommand::Ringtone { ringtone, preview })? {
+            SipSidecarReply::Status { status } => Ok(status),
+            SipSidecarReply::Error { message } => Err(AppError::Message(message)),
+            SipSidecarReply::Snapshot { snapshot } => Ok(NativeSipStatus { registered: snapshot.registered, message: snapshot.message }),
+        };
+    }
+    let path = ringtone_path(&ringtone)?;
+    with_session(|session| {
+        unsafe {
+            match path.as_ref() {
+                Some(value) => linphone_core_set_ring(session.core, value.as_ptr()),
+                None => linphone_core_set_ring(session.core, ptr::null()),
+            }
+        }
+        if preview {
+            if let Some(value) = path.as_ref() {
+                let status = unsafe { linphone_core_play_local(session.core, value.as_ptr()) };
+                if status != 0 {
+                    return Err(AppError::Message("Klingelton-Vorschau konnte nicht abgespielt werden".to_string()));
+                }
+            }
+        }
+        Ok(NativeSipStatus { registered: true, message: "Klingelton übernommen.".to_string() })
+    })
+}
+
+#[tauri::command]
 fn sip_transfer(target: String) -> Result<NativeSipStatus, AppError> {
     if !is_sip_sidecar_process() {
         return match sip_sidecar_call(SipSidecarCommand::Transfer { target })? {
@@ -3062,6 +3130,7 @@ pub fn run() {
             sip_conference,
             sip_attended_transfer,
             sip_set_audio_levels,
+            sip_set_ringtone,
             sip_transfer,
             sip_mute,
             sip_dtmf,

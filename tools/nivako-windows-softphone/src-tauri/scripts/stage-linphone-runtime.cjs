@@ -40,6 +40,7 @@ function copyDir(source, target) {
 
 copyDir(path.join(src, "lib"), path.join(dest, "lib"));
 copyDir(path.join(src, "share"), path.join(dest, "share"));
+copyDir(path.join(appRoot, "src-tauri", "ringtones"), path.join(dest, "ringtones"));
 
 if (!fs.existsSync(path.join(dest, "liblinphone.dll"))) {
   throw new Error("liblinphone.dll was not copied next to nivako-softphone.exe");
