@@ -174,6 +174,9 @@ function playRingtonePulse(): void {
 function setRingtoneActive(active: boolean): void {
   stopRingtone();
   if (!active || settings.ringtone === "silent") return;
+  // Native liblinphone already plays the configured incoming-call ringtone.
+  // Adding the WebAudio pulse here causes two ringtones at the same time.
+  if (isTauriRuntime() && canUseNativeTelephony()) return;
   playRingtonePulse();
   ringtoneTimer = window.setInterval(playRingtonePulse, 3200);
 }
