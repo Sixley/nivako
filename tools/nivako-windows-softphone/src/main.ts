@@ -1121,24 +1121,22 @@ async function updateCredentialState(): Promise<void> {
 
 async function startDesktopServices(): Promise<void> {
   if (!isTauriRuntime()) return;
-  const tasks: Promise<void>[] = [];
+  const services: string[] = [];
 
   if (hasStoredCardDavPassword) {
-    tasks.push(syncCardDav());
+    services.push("CardDAV");
+    await syncCardDav();
   }
 
   if (hasStoredSipPassword && !state.registered) {
-    // SIP darf nie auf einen langsamen oder fehlerhaften CardDAV-Abruf warten.
-    tasks.push(registerSip());
+    services.push("SIP");
+    await registerSip();
   }
 
-  if (tasks.length === 0) {
+  if (services.length === 0) {
     notice = "Desktop-Modus bereit. Hinterlegte CardDAV-/SIP-Zugangsdaten fehlen noch.";
     render();
-    return;
   }
-
-  await Promise.allSettled(tasks);
 }
 
 function scheduleDesktopMaintenance(): void {
