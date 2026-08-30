@@ -2048,7 +2048,19 @@ fn sip_register(
             display_name: display_name.clone(),
             password: password.clone(),
         }) {
-            Ok(SipSidecarReply::Status { status }) => {
+            Ok(SipSidecarReply::Status { mut status }) => {
+                if !status.registered {
+                    let diagnostic = sip_register_udp(
+                        &sip_server,
+                        &sip_extension,
+                        &sip_auth_user,
+                        &display_name,
+                        &password,
+                    )
+                    .map(|result| result.message)
+                    .unwrap_or_else(|error| format!("UDP-REGISTER-Diagnose fehlgeschlagen: {error}"));
+                    status.message = format!("{} REGISTER-Diagnose: {diagnostic}", status.message);
+                }
                 set_sip_snapshot(NativeSipSnapshot {
                     registered: status.registered,
                     call_state: "idle".to_string(),
@@ -2817,7 +2829,7 @@ fn sip_presence(extensions: Vec<String>) -> Result<HashMap<String, String>, AppE
         let mut states = HashMap::new();
         for extension in extensions {
             let state = match session.presence_friends.get(&extension) {
-                Some(friend) if unsafe { linphone_friend_is_presence_received(*friend) } != 0 => match unsafe { linphone_friend_get_consolidated_presence(*friend) } {
+                Some(friend) if unsafe { linphone_friend_is_presence_received(**friend) } != 0 => match unsafe { linphone_friend_get_consolidated_presence(**friend) } {
                     0 => "online",
                     1 => "busy",
                     2 => "dnd",
