@@ -530,8 +530,8 @@ h2 small {
   gap: 16px;
   min-width: 0;
   min-height: 0;
-  overflow: auto;
-  padding: 28px 30px;
+  overflow: hidden;
+  padding: 20px 22px;
   background: #f2eee7;
 }
 
@@ -705,7 +705,7 @@ h2 small {
   box-shadow: 0 16px 45px rgba(52, 43, 28, .08);
 }
 
-.call-card { display: flex; flex-direction: column; justify-content: flex-start; overflow: visible; padding: 28px; }
+.call-card { display: flex; flex-direction: column; justify-content: flex-start; overflow: hidden; padding: 20px; }
 .call-card.idle-call { max-width: 460px; width: 100%; margin: 0 auto; }
 .call-card.in-call .callee { margin-top: 42px; text-align: center; }
 .call-card.in-call .callee strong { font-size: 32px; }
@@ -724,7 +724,7 @@ h2 small {
 .connection-alert {
   display: grid;
   gap: 3px;
-  margin-bottom: 18px;
+  margin-bottom: 12px;
   border: 1px solid #ebcf91;
   border-radius: 9px;
   padding: 12px 14px;
@@ -785,7 +785,7 @@ h2 small {
 .callee {
   display: grid;
   gap: 4px;
-  margin: 2px 0 16px;
+  margin: 2px 0 10px;
 }
 
 .callee strong {
@@ -811,6 +811,27 @@ h2 small {
   background: #eee9e1;
   font-size: 18px;
   font-weight: 800;
+}
+
+.pickup-action {
+  margin-top: 10px;
+  padding: 9px 8px;
+  line-height: 1.2;
+}
+
+@media (max-height: 760px) and (min-width: 861px) {
+  .phone-panel { padding: 12px 16px; }
+  .call-card { padding: 14px; border-radius: 14px; }
+  .connection-alert { margin-bottom: 8px; padding: 8px 10px; }
+  .callee { margin-bottom: 7px; }
+  .callee strong { font-size: 21px; }
+  .number-input { padding: 9px 11px; }
+  .speed-dials { margin-top: 5px; }
+  .keypad { gap: 5px; margin: 7px 0 8px; }
+  .keypad button { height: 36px; font-size: 16px; }
+  .call-actions { gap: 6px; }
+  .call-actions .secondary, .primary, .danger { padding-top: 8px; padding-bottom: 8px; }
+  .compact-actions, .pickup-action { margin-top: 6px; }
 }
 
 .keypad button:hover {
@@ -1000,5 +1021,6 @@ h2 small {
 
   .phone-panel {
     padding-top: 0;
+    overflow: visible;
   }
 }
